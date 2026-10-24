@@ -7359,11 +7359,16 @@ void RenderSystem::updateTransform(Transform& transform, Entity entity){
         origin += getUIPivotShift(*layout, transform.rotation, transform.scale);
     }
 
-    Matrix4 translateMatrix = Matrix4::translateMatrix(origin);
-    Matrix4 rotationMatrix = transform.rotation.getRotationMatrix();
-    Matrix4 scaleMatrix = Matrix4::scaleMatrix(transform.scale);
+    // most 2D objects only move, and the identity factors would not change the product
+    if (transform.rotation == Quaternion() && transform.scale == Vector3(1, 1, 1)){
+        transform.localMatrix = Matrix4::translateMatrix(origin);
+    }else{
+        Matrix4 translateMatrix = Matrix4::translateMatrix(origin);
+        Matrix4 rotationMatrix = transform.rotation.getRotationMatrix();
+        Matrix4 scaleMatrix = Matrix4::scaleMatrix(transform.scale);
 
-    transform.localMatrix = translateMatrix * rotationMatrix * scaleMatrix;
+        transform.localMatrix = translateMatrix * rotationMatrix * scaleMatrix;
+    }
 
     Transform* transformParent = NULL;
     if (transform.parent != NULL_ENTITY){
