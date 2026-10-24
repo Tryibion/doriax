@@ -5,8 +5,22 @@
 #include "Log.h"
 #include "SokolCmdQueue.h"
 #include "Engine.h"
+#include "SokolResourceCache.h"
+#include "pool/MeshLodPool.h"
+#include <tuple>
 
 using namespace doriax;
+
+namespace {
+    // type, size and a hash of the bytes, the way the LOD cache identifies geometry
+    using BufferKey = std::tuple<int, size_t, uint64_t>;
+
+    SokolResourceCache<BufferKey, sg_buffer>& getSharedBuffers(){
+        // never destroyed: buffers can be released at exit
+        static auto* shared = new SokolResourceCache<BufferKey, sg_buffer>();
+        return *shared;
+    }
+}
 
 SokolBuffer::SokolBuffer(){
     buffer.id = SG_INVALID_ID;
@@ -54,6 +68,12 @@ bool SokolBuffer::createBuffer(unsigned int size, void* data, BufferType type, B
 
     if (Engine::isAsyncThread()){
         buffer = SokolCmdQueue::add_command_make_buffer(vbuf_desc);
+    }else if (usage == BufferUsage::IMMUTABLE && data && size > 0 &&
+            (type == BufferType::VERTEX_BUFFER || type == BufferType::INDEX_BUFFER)){
+        // the layout belongs to each pipeline, so equal bytes can share one buffer
+        BufferKey key((int)type, size, MeshLodPool::hash(0, data, size));
+        buffer = getSharedBuffers().get(key, [&](){ return sg_make_buffer(vbuf_desc); },
+            [](sg_buffer created){ return sg_query_buffer_state(created) == SG_RESOURCESTATE_VALID; });
     }else{
         buffer = sg_make_buffer(vbuf_desc);
     }
@@ -99,7 +119,7 @@ void SokolBuffer::destroyBuffer(){
             sg_destroy_view(view);
         }
     }
-    if (buffer.id != SG_INVALID_ID && sg_isvalid()){
+    if (buffer.id != SG_INVALID_ID && sg_isvalid() && getSharedBuffers().release(buffer)){
         if (Engine::isAsyncThread()){
             SokolCmdQueue::add_command_destroy_buffer(buffer);
         }else{
@@ -121,6 +141,10 @@ bool SokolBuffer::isCreated(){
 
 BufferUsage SokolBuffer::getCreatedUsage() const{
     return createdUsage;
+}
+
+void SokolBuffer::clearSharedBuffers(){
+    getSharedBuffers().clear();
 }
 
 sg_buffer SokolBuffer::get(){

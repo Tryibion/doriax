@@ -13,6 +13,7 @@
 #include "sokol_gfx.h"
 
 #include <map>
+#include <tuple>
 
 
 namespace doriax{
@@ -25,13 +26,15 @@ namespace doriax{
     struct BufferInfo{
         uint32_t id;
         size_t offset;
+        unsigned int stride;
+        bool perInstance;
 
         bool operator==(const BufferInfo &o) const {
-            return id == o.id && offset == o.offset;
+            return id == o.id && offset == o.offset && stride == o.stride && perInstance == o.perInstance;
         }
 
         bool operator<(const BufferInfo &o) const {
-            return id < o.id || (id == o.id && offset < o.offset);
+            return std::tie(id, offset, stride, perInstance) < std::tie(o.id, o.offset, o.stride, o.perInstance);
         }
     };
 
@@ -94,6 +97,9 @@ namespace doriax{
         void draw(unsigned int baseElement, unsigned int vertexCount, unsigned int instanceCount);
 
         void destroy();
+
+        // the shared pipelines belong to the current sokol context
+        static void clearSharedPipelines();
 
     };
 }

@@ -2134,6 +2134,7 @@
 		7162FC8C25962A0E0075B97D /* SokolShader.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = SokolShader.cpp; sourceTree = "<group>"; };
 		7162FC8D25962A0E0075B97D /* SokolTexture.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SokolTexture.h; sourceTree = "<group>"; };
 		7162FC8E25962A0E0075B97D /* SokolBuffer.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SokolBuffer.h; sourceTree = "<group>"; };
+		71D5C0A1B2C3D4E5F6A7B8C9 /* SokolResourceCache.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SokolResourceCache.h; sourceTree = "<group>"; };
 		7162FC8F25962A0E0075B97D /* SokolTexture.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = SokolTexture.cpp; sourceTree = "<group>"; };
 		7162FC9025962A0E0075B97D /* SokolShader.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SokolShader.h; sourceTree = "<group>"; };
 		7162FC9125962A0E0075B97D /* SokolCamera.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SokolCamera.h; sourceTree = "<group>"; };
@@ -4353,6 +4354,7 @@
 				71CC83A826B8D54800EEBB93 /* SokolFramebuffer.h */,
 				7162FC8925962A0E0075B97D /* SokolObject.cpp */,
 				7162FC8A25962A0E0075B97D /* SokolObject.h */,
+				71D5C0A1B2C3D4E5F6A7B8C9 /* SokolResourceCache.h */,
 				7162FC9525962A0E0075B97D /* SokolCamera.cpp */,
 				7162FC9125962A0E0075B97D /* SokolCamera.h */,
 				7162FC8C25962A0E0075B97D /* SokolShader.cpp */,

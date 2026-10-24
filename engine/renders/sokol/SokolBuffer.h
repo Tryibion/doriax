@@ -28,6 +28,9 @@ namespace doriax{
         bool isCreated();
         BufferUsage getCreatedUsage() const;
 
+        // the shared buffers belong to the current sokol context
+        static void clearSharedBuffers();
+
         sg_buffer get();
         sg_view getView();
     };

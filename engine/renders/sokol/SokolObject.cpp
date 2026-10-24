@@ -9,18 +9,67 @@
 #include "SokolCmdQueue.h"
 #include "SokolShader.h"
 #include "Engine.h"
+#include "SokolResourceCache.h"
+#include <cstring>
+#include <vector>
 
 using namespace doriax;
 
 namespace {
+    using PipelineKey = std::vector<uint32_t>;
+
+    SokolResourceCache<PipelineKey, sg_pipeline>& getSharedPipelines(){
+        // never destroyed: objects can release their pipelines at exit
+        static auto* shared = new SokolResourceCache<PipelineKey, sg_pipeline>();
+        return *shared;
+    }
+
+    // a sokol update that changes the descriptor has to update the key below
+    static_assert(sizeof(void*) != 8 || sizeof(sg_pipeline_desc) == 808, "sg_pipeline_desc changed");
+
+    // every field sokol reads, without padding or label
+    PipelineKey getPipelineKey(const sg_pipeline_desc& desc){
+        PipelineKey key;
+        key.reserve(160);
+        auto add = [&](auto value){ key.push_back(static_cast<uint32_t>(value)); };
+        auto addFloat = [&](float value){ uint32_t bits; std::memcpy(&bits, &value, sizeof(bits)); key.push_back(bits); };
+        add(desc.compute);
+        add(desc.shader.id);
+        for (const auto& buffer : desc.layout.buffers){
+            add(buffer.stride); add(buffer.step_func); add(buffer.step_rate);
+        }
+        for (const auto& attr : desc.layout.attrs){
+            add(attr.buffer_index); add(attr.offset); add(attr.format);
+        }
+        add(desc.depth.pixel_format); add(desc.depth.compare); add(desc.depth.write_enabled);
+        addFloat(desc.depth.bias); addFloat(desc.depth.bias_slope_scale); addFloat(desc.depth.bias_clamp);
+        add(desc.stencil.enabled);
+        for (const auto& face : {desc.stencil.front, desc.stencil.back}){
+            add(face.compare); add(face.fail_op); add(face.depth_fail_op); add(face.pass_op);
+        }
+        add(desc.stencil.read_mask); add(desc.stencil.write_mask); add(desc.stencil.ref);
+        add(desc.color_count);
+        for (const auto& color : desc.colors){
+            add(color.pixel_format); add(color.write_mask); add(color.blend.enabled);
+            add(color.blend.src_factor_rgb); add(color.blend.dst_factor_rgb); add(color.blend.op_rgb);
+            add(color.blend.src_factor_alpha); add(color.blend.dst_factor_alpha); add(color.blend.op_alpha);
+        }
+        add(desc.primitive_type); add(desc.index_type); add(desc.cull_mode); add(desc.face_winding);
+        add(desc.sample_count);
+        addFloat(desc.blend_color.r); addFloat(desc.blend_color.g); addFloat(desc.blend_color.b); addFloat(desc.blend_color.a);
+        add(desc.alpha_to_coverage_enabled);
+        return key;
+    }
+
     sg_pipeline makePipeline(const sg_pipeline_desc& desc){
         if (Engine::isAsyncThread())
             return SokolCmdQueue::add_command_make_pipeline(desc);
-        return sg_make_pipeline(desc);
+        return getSharedPipelines().get(getPipelineKey(desc), [&](){ return sg_make_pipeline(desc); },
+            [](sg_pipeline pipeline){ return sg_query_pipeline_state(pipeline) == SG_RESOURCESTATE_VALID; });
     }
 
     void destroyPipeline(sg_pipeline pipeline){
-        if (pipeline.id == SG_INVALID_ID)
+        if (pipeline.id == SG_INVALID_ID || !getSharedPipelines().release(pipeline))
             return;
         if (Engine::isAsyncThread()){
             SokolCmdQueue::add_command_destroy_pipeline(pipeline);
@@ -28,6 +77,10 @@ namespace {
             sg_destroy_pipeline(pipeline);
         }
     }
+}
+
+void SokolObject::clearSharedPipelines(){
+    getSharedPipelines().clear();
 }
 
 SokolObject::SokolObject(){
@@ -215,10 +268,12 @@ void SokolObject::addAttribute(int slot, BufferRender* buffer, unsigned int elem
             attrOffset = 0;
         }
         
-        if (bufferToBindSlot.count({vbuf.id, bufferOffset}) == 0){
+        // shared immutable buffers can back attributes of different layouts
+        const BufferInfo info{vbuf.id, bufferOffset, stride, perInstance};
+        if (bufferToBindSlot.count(info) == 0){
             bind.vertex_buffers[bindSlotIndex] = vbuf;
             bind.vertex_buffer_offsets[bindSlotIndex] = bufferOffset;
-            bufferToBindSlot[{vbuf.id, bufferOffset}] = bindSlotIndex;
+            bufferToBindSlot[info] = bindSlotIndex;
 
             pipeline_desc.layout.buffers[bindSlotIndex].stride = stride;
 
@@ -229,7 +284,7 @@ void SokolObject::addAttribute(int slot, BufferRender* buffer, unsigned int elem
             bindSlotIndex++;
         }
 
-        size_t indexBuf = bufferToBindSlot[{vbuf.id, bufferOffset}];
+        size_t indexBuf = bufferToBindSlot[info];
 
         pipeline_desc.layout.attrs[slot].buffer_index = indexBuf;
         pipeline_desc.layout.attrs[slot].offset = attrOffset;

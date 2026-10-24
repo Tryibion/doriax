@@ -6,6 +6,8 @@
 #include "System.h"
 #include "sokol_gfx.h"
 #include "SokolCmdQueue.h"
+#include "SokolObject.h"
+#include "SokolBuffer.h"
 #include "Engine.h"
 #include "Log.h"
 
@@ -91,6 +93,8 @@ void SokolSystem::shutdown(){
     SokolCmdQueue::flush_commands();
     SokolCmdQueue::wait_for_flush();
     SokolCmdQueue::finish();
+    SokolObject::clearSharedPipelines();
+    SokolBuffer::clearSharedBuffers();
     sg_shutdown();
 }
 
