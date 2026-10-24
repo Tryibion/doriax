@@ -9212,7 +9212,7 @@ void RenderSystem::update(double dt){
 
             if (meshLodToggled && mesh.loadCalled && !mesh.needReload){
                 updateMeshLods(entity, mesh, true);
-            }else if (mesh.loaded && !mesh.needReload){
+            }else if (lastMeshLodEnabled && mesh.loaded && !mesh.needReload){
                 for (unsigned int s = 0; s < mesh.numSubmeshes; s++){
                     if (isMeshLodPending(mesh.submeshes[s])){
                         updateMeshLods(entity, mesh, false);
