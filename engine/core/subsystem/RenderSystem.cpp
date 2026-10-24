@@ -9317,7 +9317,12 @@ void RenderSystem::update(double dt){
                 // too, but unions body-sized boxes over the skeleton. Local space so the editor
                 // draws the same box.
                 mesh.skinnedAABB.setNull();
-                if (!instmesh){
+                // in exports bonesMatrix.size() is the capacity, so rigid meshes skip the bones
+                bool skinned = false;
+                for (unsigned int s = 0; s < mesh.numSubmeshes; s++){
+                    skinned = skinned || mesh.submeshes[s].hasSkinning;
+                }
+                if (!instmesh && skinned){
                     const size_t boneBounds = std::min(mesh.bonesAABB.size(), mesh.bonesMatrix.size());
                     for (size_t b = 0; b < boneBounds; b++){
                         if (!mesh.bonesAABB[b].isNull()){
