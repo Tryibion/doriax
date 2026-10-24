@@ -36,6 +36,12 @@ using namespace doriax;
 namespace {
     constexpr int SPOT_MASK_TILE_SIZE = 256;
 
+    // the signature already tells which components exist, so absent ones cost no lookup
+    template<typename T>
+    T* findComponent(Scene* scene, Entity entity, const Signature& signature){
+        return signature.test(scene->getComponentId<T>()) ? &scene->getComponent<T>(entity) : nullptr;
+    }
+
     // every light, not just the selected ones, so the variant does not change with the camera
     bool allLightsDirectional(Scene* scene){
         auto lights = scene->getComponentArray<LightComponent>();
@@ -2771,18 +2777,15 @@ bool RenderSystem::updateTerrainRenderTextures(Entity entity, TerrainComponent& 
 }
 
 void RenderSystem::updateAllTerrainRenderTextures(){
-    auto meshes = scene->getComponentArray<MeshComponent>();
-    for (int i = 0; i < meshes->size(); i++){
-        MeshComponent& mesh = meshes->getComponentFromIndex(i);
-        if (!mesh.loaded || mesh.needReload){
+    auto terrains = scene->getComponentArray<TerrainComponent>();
+    for (int i = 0; i < terrains->size(); i++){
+        Entity entity = terrains->getEntity(i);
+        MeshComponent* mesh = scene->findComponent<MeshComponent>(entity);
+        if (!mesh || !mesh->loaded || mesh->needReload){
             continue;
         }
 
-        Entity entity = meshes->getEntity(i);
-        TerrainComponent* terrain = scene->findComponent<TerrainComponent>(entity);
-        if (terrain){
-            updateTerrainRenderTextures(entity, *terrain, mesh);
-        }
+        updateTerrainRenderTextures(entity, terrains->getComponentFromIndex(i), *mesh);
     }
 }
 
@@ -9155,9 +9158,9 @@ void RenderSystem::update(double dt){
         if (signature.test(scene->getComponentId<MeshComponent>())){
             MeshComponent& mesh = scene->getComponent<MeshComponent>(entity);
 
-            TerrainComponent* terrain = scene->findComponent<TerrainComponent>(entity);
+            TerrainComponent* terrain = findComponent<TerrainComponent>(scene, entity, signature);
 
-            InstancedMeshComponent* instmesh = scene->findComponent<InstancedMeshComponent>(entity);
+            InstancedMeshComponent* instmesh = findComponent<InstancedMeshComponent>(scene, entity, signature);
             if (instmesh){
                 const float cullNear = instanceCullNear(*instmesh);
                 if (instmesh->distanceFade || cullNear > 0.0f){
@@ -9598,15 +9601,16 @@ void RenderSystem::draw(){
             for (int i = 0; i < meshes->size(); i++){
                 MeshComponent& mesh = meshes->getComponentFromIndex(i);
                 Entity entity = meshes->getEntity(i);
-                Transform* transform = scene->findComponent<Transform>(entity);
+                Signature signature = scene->getSignature(entity);
+                Transform* transform = findComponent<Transform>(scene, entity, signature);
 
                 if (!transform || !transform->visible){
                     continue;
                 }
 
-                InstancedMeshComponent* instmesh = scene->findComponent<InstancedMeshComponent>(entity);
-                TerrainComponent* terrain = scene->findComponent<TerrainComponent>(entity);
-                TilemapComponent* tilemap = scene->findComponent<TilemapComponent>(entity);
+                InstancedMeshComponent* instmesh = findComponent<InstancedMeshComponent>(scene, entity, signature);
+                TerrainComponent* terrain = findComponent<TerrainComponent>(scene, entity, signature);
+                TilemapComponent* tilemap = findComponent<TilemapComponent>(scene, entity, signature);
 
                 if (numReceiverPlanes > 0 && !transform->billboard && cullsBatch(mesh, instmesh) &&
                         !isInsidePlanes(receiverPlanes, numReceiverPlanes, mesh.worldAABB)){
@@ -10109,12 +10113,12 @@ void RenderSystem::draw(){
                     continue;
                 }
 
-                InstancedMeshComponent* instmesh = scene->findComponent<InstancedMeshComponent>(entity);
-                TerrainComponent* terrain = scene->findComponent<TerrainComponent>(entity);
+                InstancedMeshComponent* instmesh = findComponent<InstancedMeshComponent>(scene, entity, signature);
+                TerrainComponent* terrain = findComponent<TerrainComponent>(scene, entity, signature);
                 if (terrain && terrainView != 0){
                     updateTerrain(*terrain, transform, camera, cameraTransform, terrainView);
                 }
-                TilemapComponent* tilemap = scene->findComponent<TilemapComponent>(entity);
+                TilemapComponent* tilemap = findComponent<TilemapComponent>(scene, entity, signature);
 
                 if (!mesh.transparent){
                     const float distance = mesh.worldAABB.isNull() ? 0.0f : mesh.worldAABB.squaredDistance(cameraTransform.worldPosition);
@@ -10251,20 +10255,20 @@ void RenderSystem::draw(){
                     // needUpdateBuffer and uploads the buffer again, which panics the
                     // validation layer when a render-to-texture camera is present. Every
                     // camera reuses the main camera's ordering computed in update().
-                    InstancedMeshComponent* instmesh = scene->findComponent<InstancedMeshComponent>(entity);
+                    InstancedMeshComponent* instmesh = findComponent<InstancedMeshComponent>(scene, entity, signature);
 
                     // Per-view CDLOD: the main camera's selection (view 0) is done in
                     // update(); each render-to-texture camera (mirror/RTT) selects its
                     // own node cut here into its own buffer, so the reflection shows
                     // complete, correctly-tessellated terrain.
-                    TerrainComponent* terrain = scene->findComponent<TerrainComponent>(entity);
+                    TerrainComponent* terrain = findComponent<TerrainComponent>(scene, entity, signature);
                     if (terrain && terrainView != 0){
                         updateTerrain(*terrain, transform, camera, cameraTransform, terrainView);
                     }
 
                     // chunk bounds are view-independent, so every camera reuses the
                     // ones refreshed in update()
-                    TilemapComponent* tilemap = scene->findComponent<TilemapComponent>(entity);
+                    TilemapComponent* tilemap = findComponent<TilemapComponent>(scene, entity, signature);
 
                     // a transparency on the eye's side of a water waits for it
                     if (mesh.transparent && !passWaters.empty() && !isBehindWater(passWaters, mesh.worldAABB)){

@@ -6399,14 +6399,12 @@ void MeshSystem::update(double dt){
     auto sprites = scene->getComponentArray<SpriteComponent>();
     for (int i = 0; i < sprites->size(); i++){
         SpriteComponent& sprite = sprites->getComponentFromIndex(i);
+        if (!sprite.needUpdateSprite && !sprite.needUpdateFrameRect)
+            continue;
 
-        Entity entity = sprites->getEntity(i);
-        Signature signature = scene->getSignature(entity);
-
-        if (signature.test(scene->getComponentId<MeshComponent>())){
-            MeshComponent& mesh = scene->getComponent<MeshComponent>(entity);
-
-            createOrUpdateSprite(sprite, mesh);
+        MeshComponent* mesh = scene->findComponent<MeshComponent>(sprites->getEntity(i));
+        if (mesh){
+            createOrUpdateSprite(sprite, *mesh);
         }
     }
 
