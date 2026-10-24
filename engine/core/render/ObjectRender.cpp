@@ -46,8 +46,8 @@ void ObjectRender::replaceVertexBuffer(BufferRender* original, BufferRender* rep
     backend.replaceVertexBuffer(original->backend.get().id, replacement->backend.get(), byteOffset);
 }
 
-void ObjectRender::setIndexBuffer(BufferRender* buffer){
-    backend.setIndexBuffer(buffer->backend.get());
+void ObjectRender::setIndexBuffer(BufferRender* buffer, size_t byteOffset){
+    backend.setIndexBuffer(buffer->backend.get(), byteOffset);
 }
 
 void ObjectRender::resetIndexBuffer(){
@@ -60,6 +60,10 @@ void ObjectRender::addTexture(std::pair<int, int> slot, ShaderStageType stage, T
 
 bool ObjectRender::endLoad(uint16_t pipelines, bool enableFaceCulling, bool enableDepthWrite, CullingMode cullingMode, WindingOrder windingOrder, bool prepassFaceCulling){
     return backend.endLoad(pipelines, enableFaceCulling, enableDepthWrite, cullingMode, windingOrder, prepassFaceCulling);
+}
+
+bool ObjectRender::sharesState(const ObjectRender& other, PipelineType pipType) const{
+    return backend.sharesState(other.backend, pipType);
 }
 
 bool ObjectRender::beginDraw(PipelineType pipType){

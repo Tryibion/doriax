@@ -403,6 +403,38 @@ namespace doriax{
 		InstanceView instanceViews[1 + MAX_SHADOW_ATLAS_SLOTS];
 		bool instanceViewsDirty;
 
+		// Consecutive sprites of a color pass that share pipeline and textures are drawn
+		// as one: their vertices go to world space and the first sprite's render draws them.
+		struct SpriteBatchItem{
+			Entity entity;
+			MeshComponent* mesh;
+			Transform* transform;
+		};
+		struct SpriteBatch{
+			bool active = false;
+			bool depthPrepass = false;
+			PipelineType pipType = PIP_DEFAULT;
+			CameraComponent* camera = nullptr;
+			Transform* cameraTransform = nullptr;
+			std::vector<SpriteBatchItem> items;
+			Submesh* previous = nullptr; // the sprite seen before, to tell when a run starts
+			// vertex layout of the first sprite, shared by the others
+			unsigned int stride = 0;
+			size_t positionOffset = 0;
+			size_t colorOffset = 0;
+			int texcoordOffset = -1;
+			std::vector<unsigned char> vertices;
+			std::vector<uint16_t> indices;
+			BufferRender vertexBuffer;
+			BufferRender indexBuffer;
+			// bytes of the GPU buffers and bytes this frame asked for
+			size_t vertexCapacity = 0;
+			size_t indexCapacity = 0;
+			size_t vertexDemand = 0;
+			size_t indexDemand = 0;
+		};
+		SpriteBatch spriteBatch;
+
 		// error a view hides at a distance: threshold * (perUnit * distance + constant)
 		struct LodView{
 			Vector3 origin;
@@ -670,6 +702,12 @@ namespace doriax{
 		bool updateTerrainRenderTextures(Entity entity, TerrainComponent& terrain, MeshComponent& mesh);
 		void updateAllTerrainRenderTextures();
 		void updateInstanceBuffers();
+		bool batchSprite(Entity entity, MeshComponent& mesh, Transform& transform, CameraComponent& camera, InstancedMeshComponent* instmesh, TerrainComponent* terrain, TilemapComponent* tilemap);
+		bool startSpriteBatch(MeshComponent& mesh);
+		void appendSpriteGeometry(const SpriteBatchItem& item);
+		bool drawSpriteBatch();
+		void flushSpriteBatch();
+		void prepareSpriteBatchBuffers();
 		Rect getScissorRect(UILayoutComponent& layout, ImageComponent& img, Transform& transform, const Rect& passViewport);
 
 		// mesh LOD

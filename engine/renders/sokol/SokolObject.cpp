@@ -303,9 +303,9 @@ void SokolObject::replaceVertexBuffer(uint32_t fromBufferId, sg_buffer toBuffer,
     }
 }
 
-void SokolObject::setIndexBuffer(sg_buffer buffer){
+void SokolObject::setIndexBuffer(sg_buffer buffer, size_t byteOffset){
     bind.index_buffer = buffer;
-    bind.index_buffer_offset = 0;
+    bind.index_buffer_offset = (int)byteOffset;
 }
 
 void SokolObject::resetIndexBuffer(){
@@ -570,31 +570,34 @@ bool SokolObject::endLoad(uint16_t pipelines, bool enableFaceCulling, bool enabl
     return true;
 }
 
-bool SokolObject::beginDraw(PipelineType pipType){
-    sg_pipeline selectedPipeline = pip;
-    if (pipType == PipelineType::PIP_DEPTH){
-        selectedPipeline = depth_pip;
-    }else if (pipType == PipelineType::PIP_ZPREPASS){
-        selectedPipeline = zprepass_pip;
-    }else if (pipType == PipelineType::PIP_ZPREPASS_RTT){
-        selectedPipeline = zprepass_rtt_pip;
-    }else if (pipType == PipelineType::PIP_SHADOW_DEPTH){
-        selectedPipeline = shadow_depth_pip;
-    }else if (pipType == PipelineType::PIP_GBUFFER){
-        selectedPipeline = gbuffer_pip;
-    }else if (pipType == PipelineType::PIP_RTT){
-        selectedPipeline = rtt_pip;
-    }else if (pipType == PipelineType::PIP_RTT_INVERT){
-        selectedPipeline = rtt_invert_pip;
-    }else if (pipType == PipelineType::PIP_DEFAULT_NODEPTH){
-        selectedPipeline = nodepth_pip;
-    }else if (pipType == PipelineType::PIP_RTT_NODEPTH){
-        selectedPipeline = rtt_nodepth_pip;
-    }else if (pipType == PipelineType::PIP_RTT_NOBLEND){
-        selectedPipeline = rtt_noblend_pip;
-    }else if (pipType == PipelineType::PIP_RTT_COLORONLY){
-        selectedPipeline = rtt_coloronly_pip;
+sg_pipeline SokolObject::getPipeline(PipelineType pipType) const{
+    switch (pipType){
+        case PipelineType::PIP_DEPTH: return depth_pip;
+        case PipelineType::PIP_ZPREPASS: return zprepass_pip;
+        case PipelineType::PIP_ZPREPASS_RTT: return zprepass_rtt_pip;
+        case PipelineType::PIP_SHADOW_DEPTH: return shadow_depth_pip;
+        case PipelineType::PIP_GBUFFER: return gbuffer_pip;
+        case PipelineType::PIP_RTT: return rtt_pip;
+        case PipelineType::PIP_RTT_INVERT: return rtt_invert_pip;
+        case PipelineType::PIP_DEFAULT_NODEPTH: return nodepth_pip;
+        case PipelineType::PIP_RTT_NODEPTH: return rtt_nodepth_pip;
+        case PipelineType::PIP_RTT_NOBLEND: return rtt_noblend_pip;
+        case PipelineType::PIP_RTT_COLORONLY: return rtt_coloronly_pip;
+        default: return pip;
     }
+}
+
+// the vertex layout lives in the pipeline, or in the buffer offsets on D3D and Metal
+bool SokolObject::sharesState(const SokolObject& other, PipelineType pipType) const{
+    return getPipeline(pipType).id == other.getPipeline(pipType).id &&
+        std::memcmp(bind.views, other.bind.views, sizeof(bind.views)) == 0 &&
+        std::memcmp(bind.samplers, other.bind.samplers, sizeof(bind.samplers)) == 0 &&
+        std::memcmp(bind.vertex_buffer_offsets, other.bind.vertex_buffer_offsets, sizeof(bind.vertex_buffer_offsets)) == 0 &&
+        bind.index_buffer_offset == other.bind.index_buffer_offset;
+}
+
+bool SokolObject::beginDraw(PipelineType pipType){
+    sg_pipeline selectedPipeline = getPipeline(pipType);
 
     // Deferred resource creation can leave an allocated handle in FAILED state.
     // Never apply it: doing so would turn one creation error into a cascade of

@@ -70,6 +70,7 @@ namespace doriax{
         sg_primitive_type getPrimitiveType(PrimitiveType primitiveType);
         sg_cull_mode getCullMode(CullingMode cullingMode);
         sg_face_winding getFaceWinding(WindingOrder windingOrder);
+        sg_pipeline getPipeline(PipelineType pipType) const;
 
     public:
 
@@ -85,13 +86,15 @@ namespace doriax{
         // keeping the same per-slot layout/offset (used to swap a per-view instance
         // buffer in just before draw). Affects only the bindings, not the pipeline.
         void replaceVertexBuffer(uint32_t fromBufferId, sg_buffer toBuffer, size_t byteOffset);
-        void setIndexBuffer(sg_buffer buffer);
+        void setIndexBuffer(sg_buffer buffer, size_t byteOffset);
         void resetIndexBuffer();
         void addStorageBuffer(int slot, ShaderStageType stage, BufferRender* buffer);
         void addTexture(std::pair<int, int> slot, ShaderStageType stage, TextureRender* texture);
         // prepassFaceCulling applies to the PIP_ZPREPASS pipelines, which must cull like the color pass
         bool endLoad(uint16_t pipelines, bool enableFaceCulling, bool enableDepthWrite, CullingMode cullingMode, WindingOrder windingOrder, bool prepassFaceCulling = true);
 
+        // same pipeline and bindings apart from the buffers: one draw can render both
+        bool sharesState(const SokolObject& other, PipelineType pipType) const;
         bool beginDraw(PipelineType pipType);
         void applyUniformBlock(int slot, unsigned int count, void* data);
         void draw(unsigned int baseElement, unsigned int vertexCount, unsigned int instanceCount);

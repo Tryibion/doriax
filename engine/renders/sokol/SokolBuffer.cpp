@@ -111,6 +111,12 @@ void SokolBuffer::updateBuffer(unsigned int size, void* data){
     }
 }
 
+int SokolBuffer::appendBuffer(unsigned int size, const void* data){
+    if (buffer.id == SG_INVALID_ID || Engine::isAsyncThread() || sg_query_buffer_will_overflow(buffer, size))
+        return -1;
+    return sg_append_buffer(buffer, {data, (size_t)size});
+}
+
 void SokolBuffer::destroyBuffer(){
     if (view.id != SG_INVALID_ID && sg_isvalid()){
         if (Engine::isAsyncThread()){

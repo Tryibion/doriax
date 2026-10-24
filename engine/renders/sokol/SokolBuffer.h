@@ -24,6 +24,8 @@ namespace doriax{
 
         bool createBuffer(unsigned int size, void* data, BufferType type, BufferUsage usage);
         void updateBuffer(unsigned int size, void* data);
+        // byte offset of the appended data, or -1 when it does not fit this frame
+        int appendBuffer(unsigned int size, const void* data);
         void destroyBuffer();
         bool isCreated();
         BufferUsage getCreatedUsage() const;

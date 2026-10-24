@@ -439,6 +439,10 @@ void RenderSystem::destroy(){
         view.data.clear();
         view.capacity = 0;
     }
+    spriteBatch.vertexBuffer.destroyBuffer();
+    spriteBatch.indexBuffer.destroyBuffer();
+    spriteBatch.vertexCapacity = 0;
+    spriteBatch.indexCapacity = 0;
     instanceViewsDirty = true;
     shadowAtlasFramebuffer.destroyFramebuffer();
     shadowAtlasSlotResolution = 0;
@@ -4173,7 +4177,237 @@ void RenderSystem::updateTerrainNodesBuffer(TerrainComponent& terrain, int viewI
     terrain.views[viewIndex].needUpdateNodesBuffer = false;
 }
 
+// false when the mesh needs its own draw; culled sprites count as batched
+bool RenderSystem::batchSprite(Entity entity, MeshComponent& mesh, Transform& transform, CameraComponent& camera, InstancedMeshComponent* instmesh, TerrainComponent* terrain, TilemapComponent* tilemap){
+    // Ult and Vc4, optionally Uv1, Txr, Fog, Ams and Aop: nothing else in them is per object
+    constexpr uint32_t required = (1u << 0) | (1u << 10);
+    constexpr uint32_t allowed = required | (1u << 1) | (1u << 11) | (1u << 12) | (1u << 24) | (1u << 25);
+
+    // quads: for bigger meshes a draw with shared buffers costs less than moving the vertices.
+    // An opaque mesh in the depth prepass keeps its own transform, or its depth would not match
+    if (!mesh.loaded || mesh.needReload || instmesh || terrain || tilemap || mesh.numSubmeshes != 1 ||
+            mesh.numExternalBuffers != 0 || mesh.buffer.getCount() > 4 || !mesh.buffer.getData() ||
+            !mesh.indices.getData() || (!mesh.transparent && spriteBatch.depthPrepass))
+        return false;
+
+    Submesh& submesh = mesh.submeshes[0];
+    const float* model = transform.modelMatrix;
+    // a projective model matrix keeps its w on the GPU
+    if ((submesh.shaderProperties & required) != required || (submesh.shaderProperties & ~allowed) ||
+            submesh.needUpdateTexture || submesh.lodData || (transform.billboard && transform.fakeBillboard) ||
+            model[3] != 0 || model[7] != 0 || model[11] != 0 || model[15] != 1)
+        return false;
+
+    // an equal pipeline means the same shader, layout and blending
+    const bool alphaMask = submesh.shaderProperties & (1u << 24);
+    auto sharesState = [&](const Submesh& other){
+        return other.render.sharesState(submesh.render, spriteBatch.pipType) &&
+            (!alphaMask || other.material.alphaCutoff == submesh.material.alphaCutoff);
+    };
+
+    if (!spriteBatch.items.empty()){
+        // nothing to draw, and no reason to split the batch around it
+        if (cullsBatch(mesh, nullptr) && !isInsideCamera(camera, mesh.worldAABB))
+            return true;
+
+        MeshComponent& first = *spriteBatch.items[0].mesh;
+        const size_t batchVertices = (spriteBatch.items.size() == 1) ? first.buffer.getCount() : spriteBatch.vertices.size() / spriteBatch.stride;
+        if (!sharesState(first.submeshes[0]) || batchVertices + mesh.buffer.getCount() > std::numeric_limits<uint16_t>::max()){
+            flushSpriteBatch();
+        }
+    }
+
+    // a sprite unlike the one drawn before it is drawn right away, so a batch starts on
+    // the second sprite of a run and changing textures never wait for one
+    if (spriteBatch.items.empty()){
+        Submesh* previous = spriteBatch.previous;
+        spriteBatch.previous = &submesh;
+        if (!previous || !sharesState(*previous))
+            return false;
+        if (cullsBatch(mesh, nullptr) && !isInsideCamera(camera, mesh.worldAABB))
+            return true;
+        if (!startSpriteBatch(mesh))
+            return false;
+    }
+
+    spriteBatch.items.push_back({entity, &mesh, &transform});
+    if (spriteBatch.items.size() == 2){
+        appendSpriteGeometry(spriteBatch.items[0]);
+    }
+    if (spriteBatch.items.size() >= 2){
+        appendSpriteGeometry(spriteBatch.items.back());
+    }
+
+    return true;
+}
+
+// checks what an equal pipeline does not tell, and takes the layout the batch writes from its first sprite
+bool RenderSystem::startSpriteBatch(MeshComponent& mesh){
+    const Submesh& submesh = mesh.submeshes[0];
+    if (submesh.customShaderId != 0 || !mesh.customShader.empty() || !scene->getDefaultMeshShader().empty() ||
+            submesh.primitiveType != PrimitiveType::TRIANGLES || !submesh.attributes.empty() || submesh.vertexCount == 0 ||
+            submesh.material.baseColorTexture.isFramebuffer())
+        return false;
+
+    Attribute* position = mesh.buffer.getAttribute(AttributeType::POSITION);
+    Attribute* texcoord = mesh.buffer.getAttribute(AttributeType::TEXCOORD1);
+    Attribute* color = mesh.buffer.getAttribute(AttributeType::COLOR);
+    Attribute* index = mesh.indices.getAttribute(AttributeType::INDEX);
+    if (!position || !color || !index ||
+            position->getDataType() != AttributeDataType::FLOAT || position->getElements() != 3 ||
+            color->getDataType() != AttributeDataType::FLOAT || color->getElements() != 4 ||
+            (texcoord && (texcoord->getDataType() != AttributeDataType::FLOAT || texcoord->getElements() != 2)) ||
+            ((submesh.shaderProperties & (1u << 1)) && !texcoord) ||
+            index->getDataType() != AttributeDataType::UNSIGNED_SHORT || index->getOffset() != 0 ||
+            index->getCount() < submesh.vertexCount)
+        return false;
+
+    spriteBatch.stride = mesh.buffer.getStride();
+    spriteBatch.positionOffset = position->getOffset();
+    spriteBatch.colorOffset = color->getOffset();
+    spriteBatch.texcoordOffset = texcoord ? (int)texcoord->getOffset() : -1;
+    return true;
+}
+
+void RenderSystem::appendSpriteGeometry(const SpriteBatchItem& item){
+    const MeshComponent& mesh = *item.mesh;
+    const Submesh& submesh = mesh.submeshes[0];
+    const Matrix4& model = item.transform->modelMatrix;
+    const Rect& rect = submesh.textureRect;
+    const Vector4& tint = submesh.material.baseColorFactor;
+
+    const unsigned int stride = spriteBatch.stride;
+    const unsigned int count = mesh.buffer.getCount();
+    const size_t start = spriteBatch.vertices.size();
+    const uint16_t base = (uint16_t)(start / stride);
+    spriteBatch.vertices.resize(start + (size_t)count * stride);
+    unsigned char* vertex = spriteBatch.vertices.data() + start;
+    std::memcpy(vertex, mesh.buffer.getData(), (size_t)count * stride);
+
+    // the texture rect and material color become vertex data, the batch draws with neutral uniforms
+    for (unsigned int v = 0; v < count; v++, vertex += stride){
+        Vector3 position;
+        std::memcpy(&position, vertex + spriteBatch.positionOffset, sizeof(float) * 3);
+        position = model * position;
+        std::memcpy(vertex + spriteBatch.positionOffset, &position, sizeof(float) * 3);
+
+        if (spriteBatch.texcoordOffset >= 0 && submesh.hasTextureRect){
+            float uv[2];
+            std::memcpy(uv, vertex + spriteBatch.texcoordOffset, sizeof(uv));
+            uv[0] = uv[0] * rect.getWidth() + rect.getX();
+            uv[1] = uv[1] * rect.getHeight() + rect.getY();
+            std::memcpy(vertex + spriteBatch.texcoordOffset, uv, sizeof(uv));
+        }
+
+        float color[4];
+        std::memcpy(color, vertex + spriteBatch.colorOffset, sizeof(color));
+        color[0] *= tint.x;
+        color[1] *= tint.y;
+        color[2] *= tint.z;
+        color[3] *= tint.w;
+        std::memcpy(vertex + spriteBatch.colorOffset, color, sizeof(color));
+    }
+
+    const uint16_t* indices = reinterpret_cast<const uint16_t*>(mesh.indices.getData());
+    for (unsigned int i = 0; i < submesh.vertexCount; i++){
+        spriteBatch.indices.push_back(base + indices[i]);
+    }
+}
+
+bool RenderSystem::drawSpriteBatch(){
+    const size_t vertexBytes = spriteBatch.vertices.size();
+    const size_t indexBytes = spriteBatch.indices.size() * sizeof(uint16_t);
+    spriteBatch.vertexDemand += vertexBytes;
+    spriteBatch.indexDemand += indexBytes;
+
+    if (!spriteBatch.vertexBuffer.isCreated() || !spriteBatch.indexBuffer.isCreated())
+        return false;
+    const int vertexOffset = spriteBatch.vertexBuffer.appendBuffer(vertexBytes, spriteBatch.vertices.data());
+    const int indexOffset = spriteBatch.indexBuffer.appendBuffer(indexBytes, spriteBatch.indices.data());
+    if (vertexOffset < 0 || indexOffset < 0)
+        return false;
+
+    MeshComponent& mesh = *spriteBatch.items[0].mesh;
+    Submesh& submesh = mesh.submeshes[0];
+    ObjectRender& render = submesh.render;
+    if (!render.beginDraw(spriteBatch.pipType))
+        return false;
+
+    if (hasFog){
+        render.applyUniformBlock(submesh.slotFSFog, sizeof(float) * 8, &fs_fog);
+    }
+
+    if (submesh.hasTextureRect){
+        Rect fullRect(0, 0, 1, 1);
+        render.applyUniformBlock(submesh.slotVSSprite, sizeof(float) * 4, &fullRect);
+    }
+
+    // the color factor is already in the vertices
+    float materialParams[8];
+    std::memcpy(materialParams, &submesh.material, sizeof(materialParams));
+    std::fill(materialParams, materialParams + 4, 1.0f);
+    const bool alphaMask = submesh.shaderProperties & (1u << 24);
+    render.applyUniformBlock(submesh.slotFSParams, sizeof(float) * (alphaMask ? 8 : 4), materialParams);
+
+    Matrix4 matrices[3];
+    matrices[2] = spriteBatch.camera->viewProjectionMatrix;
+    if (isRenderingFlipped(*spriteBatch.camera)){
+        matrices[2] = Matrix4::scaleMatrix(Vector3(1, -1, 1)) * matrices[2];
+    }
+    render.applyUniformBlock(submesh.slotVSParams, sizeof(matrices), matrices);
+
+    render.replaceVertexBuffer(mesh.buffer.getRender(), &spriteBatch.vertexBuffer, vertexOffset);
+    render.setIndexBuffer(&spriteBatch.indexBuffer, indexOffset);
+    render.draw(0, (unsigned int)spriteBatch.indices.size(), 1);
+    render.replaceVertexBuffer(mesh.buffer.getRender(), mesh.buffer.getRender());
+    render.resetIndexBuffer();
+
+    return true;
+}
+
+void RenderSystem::flushSpriteBatch(){
+    if (spriteBatch.items.empty())
+        return;
+
+    if (spriteBatch.items.size() == 1 || !drawSpriteBatch()){
+        const bool active = spriteBatch.active;
+        spriteBatch.active = false;
+        for (const SpriteBatchItem& item : spriteBatch.items){
+            drawMesh(item.entity, *item.mesh, *item.transform, *spriteBatch.camera, *spriteBatch.cameraTransform, spriteBatch.pipType, nullptr, nullptr, nullptr);
+        }
+        spriteBatch.active = active;
+    }
+
+    spriteBatch.items.clear();
+    spriteBatch.vertices.clear();
+    spriteBatch.indices.clear();
+}
+
+// sized from the last frame before any batch of this one uses the buffers
+void RenderSystem::prepareSpriteBatchBuffers(){
+    auto prepare = [](BufferRender& buffer, size_t& capacity, size_t& demand, BufferType type){
+        if (buffer.isCreated() && demand <= capacity){
+            demand = 0;
+            return;
+        }
+        buffer.destroyBuffer();
+        capacity = std::max(capacity, demand + demand / 2);
+        demand = 0;
+        if (capacity > 0){
+            buffer.createBuffer((unsigned int)capacity, nullptr, type, BufferUsage::STREAM);
+        }
+    };
+    prepare(spriteBatch.vertexBuffer, spriteBatch.vertexCapacity, spriteBatch.vertexDemand, BufferType::VERTEX_BUFFER);
+    prepare(spriteBatch.indexBuffer, spriteBatch.indexCapacity, spriteBatch.indexDemand, BufferType::INDEX_BUFFER);
+}
+
 bool RenderSystem::drawMesh(Entity entity, MeshComponent& mesh, Transform& transform, CameraComponent& camera, Transform& camTransform, PipelineType pipType, InstancedMeshComponent* instmesh, TerrainComponent* terrain, TilemapComponent* tilemap, int terrainView, int instanceView, const LodView* lodView){
+    if (spriteBatch.active){
+        if (batchSprite(entity, mesh, transform, camera, instmesh, terrain, tilemap))
+            return true;
+        flushSpriteBatch();
+    }
+
     if (mesh.loaded && !mesh.needReload){
 
         if (terrain && terrain->needUpdateTexture){
@@ -5731,6 +5965,7 @@ bool RenderSystem::loadUI(Entity entity, UIComponent& ui, uint16_t pipelines, bo
 }
 
 bool RenderSystem::drawUI(UIComponent& ui, Transform& transform, PipelineType pipType){
+    flushSpriteBatch();
     if (ui.loaded && ui.buffer.getSize() > 0){
 
         if (ui.needUpdateTexture || ui.texture.isFramebufferOutdated()){
@@ -6034,6 +6269,7 @@ float RenderSystem::computePointsScale(const CameraComponent& camera, float view
 }
 
 bool RenderSystem::drawPoints(PointsComponent& points, Transform& transform, CameraComponent& camera, Transform& camTransform, PipelineType pipType){
+    flushSpriteBatch();
     if (points.loaded && points.numVisible > 0){
 
         if (points.needUpdateTexture || points.texture.isFramebufferOutdated()){
@@ -6107,6 +6343,7 @@ void RenderSystem::destroyPoints(Entity entity, PointsComponent& points){
 }
 
 bool RenderSystem::drawLines(LinesComponent& lines, Transform& transform, Transform& camTransform, PipelineType pipType){
+    flushSpriteBatch();
     if (lines.loaded && lines.lines.size() > 0){
 
         if (lines.needUpdateBuffer){
@@ -6813,6 +7050,7 @@ void RenderSystem::updateWater(Entity entity, WaterComponent& water, Transform& 
 }
 
 bool RenderSystem::drawWater(Entity entity, WaterComponent& water, Transform& transform, CameraComponent& camera, Transform& camTransform, PipelineType pipType, bool mainCamera){
+    flushSpriteBatch();
     if (!water.loaded || water.needReload || water.indexCount == 0)
         return false;
 
@@ -9557,6 +9795,7 @@ void RenderSystem::update(double dt){
 }
 
 void RenderSystem::draw(){
+    prepareSpriteBatchBuffers();
     std::priority_queue<TransparentRenderData, std::vector<TransparentRenderData>, TransparentRenderComparison> transparentRenders;
     // drawn before the water, which covers them
     decltype(transparentRenders) behindWaterRenders;
@@ -10172,6 +10411,13 @@ void RenderSystem::draw(){
             }
         }
 
+        spriteBatch.active = true;
+        spriteBatch.previous = nullptr;
+        spriteBatch.depthPrepass = depthPrepass;
+        spriteBatch.pipType = colorPip;
+        spriteBatch.camera = &camera;
+        spriteBatch.cameraTransform = &cameraTransform;
+
         if (distanceSort){
             for (const OpaqueRenderData& opaque : opaqueRenders){
                 drawMesh(opaque.entity, *opaque.mesh, *opaque.transform, camera, cameraTransform, colorPip, opaque.instmesh, opaque.terrain, opaque.tilemap, terrainView, instanceView, lodView);
@@ -10227,6 +10473,7 @@ void RenderSystem::draw(){
                         // empty rect would leak a pixel: skip the draw instead
                         clippedAway = true;
                     }else{
+                        flushSpriteBatch();
                         camera.render.applyScissor(parentScissor);
 
                         hasActiveScissor = true;
@@ -10326,6 +10573,7 @@ void RenderSystem::draw(){
             }
 
             if (hasActiveScissor){
+                flushSpriteBatch();
                 // screen pixels would overflow an offscreen SSR / post-process attachment
                 camera.render.applyScissor(colorPassViewport);
                 hasActiveScissor = false;
@@ -10350,6 +10598,7 @@ void RenderSystem::draw(){
         // a plain copy keeps it
         CameraRender* passRender = &camera.render;
         if (copyScene){
+            flushSpriteBatch();
             // ended first: creating the copy framebuffer runs a clear pass, and passes can't nest
             camera.render.endRenderPass();
             const bool copied = ensureSceneCopyFramebuffer(colorTarget->getWidth(), colorTarget->getHeight());
@@ -10411,6 +10660,8 @@ void RenderSystem::draw(){
             transparentRenders.pop();
         }
 
+        flushSpriteBatch();
+        spriteBatch.active = false;
         passRender->endRenderPass();
 
         // SSR: march the offscreen scene color and composite reflections into the
