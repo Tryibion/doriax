@@ -63,7 +63,7 @@ void sokol_log(const char* tag,                // e.g. 'sg'
 void SokolSystem::setup(){
     /* setup sokol_gfx */
     sg_desc desc = {0};
-    desc.buffer_pool_size = 8192; //default: 128
+    desc.buffer_pool_size = 32768; //default: 128 (each sprite has its own vertex buffer)
     desc.image_pool_size = 2048; //default: 128
     desc.sampler_pool_size = 2048; //default: 64
     desc.view_pool_size = 4096; //default: 256 (texture, storage-buffer and attachment views)
