@@ -357,9 +357,11 @@ void UISystem::createText(TextComponent& text, UIComponent& ui, UILayoutComponen
 
         Log::warn("Text is bigger than maxTextSize: %i. Increasing it to: %i", text.maxTextSize, newSize);
         text.maxTextSize = newSize;
-        if (ui.loaded){
-            ui.needReload = true;
-        }
+    }
+
+    // GPU buffers keep the size they were loaded with
+    if (ui.loaded && text.maxTextSize * 4 > ui.minBufferCount){
+        ui.needReload = true;
     }
 
     ui.minBufferCount = text.maxTextSize * 4;
