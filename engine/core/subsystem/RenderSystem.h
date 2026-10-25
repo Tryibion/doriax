@@ -702,6 +702,7 @@ namespace doriax{
 		bool updateTerrainRenderTextures(Entity entity, TerrainComponent& terrain, MeshComponent& mesh);
 		void updateAllTerrainRenderTextures();
 		void updateInstanceBuffers();
+		void updateSkinBuffers();
 		bool batchSprite(Entity entity, MeshComponent& mesh, Transform& transform, CameraComponent& camera, InstancedMeshComponent* instmesh, TerrainComponent* terrain, TilemapComponent* tilemap);
 		bool startSpriteBatch(MeshComponent& mesh);
 		void appendSpriteGeometry(const SpriteBatchItem& item);

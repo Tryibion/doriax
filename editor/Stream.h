@@ -266,7 +266,7 @@ namespace doriax::editor {
         static YAML::Node encodeTransform(const Transform& transform);
         static Transform decodeTransform(const YAML::Node& node, const Transform* oldTransform = nullptr);
 
-        static YAML::Node encodeMeshComponent(const MeshComponent& mesh, bool encodeBuffers = true, bool embedTextureData = true, bool encodeBones = true);
+        static YAML::Node encodeMeshComponent(const MeshComponent& mesh, bool encodeBuffers = true, bool embedTextureData = true);
         static MeshComponent decodeMeshComponent(const YAML::Node& node, const MeshComponent* oldMesh = nullptr);
 
         static YAML::Node encodeUIComponent(const UIComponent& ui, bool encodeBuffers = true, bool embedTextureData = true);
@@ -416,6 +416,9 @@ namespace doriax::editor {
 
         static YAML::Node encodeBoneComponent(const BoneComponent& bone);
         static BoneComponent decodeBoneComponent(const YAML::Node& node, const BoneComponent* oldBone = nullptr);
+
+        static YAML::Node encodeSkinComponent(const SkinComponent& skin);
+        static SkinComponent decodeSkinComponent(const YAML::Node& node, const SkinComponent* oldSkin = nullptr);
 
         static YAML::Node encodeKeyframeTracksComponent(const KeyframeTracksComponent& tracks);
         static KeyframeTracksComponent decodeKeyframeTracksComponent(const YAML::Node& node, const KeyframeTracksComponent* oldTracks = nullptr);

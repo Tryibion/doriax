@@ -390,6 +390,12 @@ namespace {
         makeFastProperty<BoneComponent, Vector3, &BoneComponent::bindScale>("bindScale", PropertyType::Vector3, UpdateFlags_None),
     };
 
+    // the palette itself is rewritten by the animation every frame; another bone count needs its
+    // GPU buffer made again, which the mesh reload does
+    static const FastPropertyDescriptor kSkinProperties[] = {
+        makeFastPropertyNoDefault<SkinComponent, unsigned int, &SkinComponent::numBones>("numBones", PropertyType::UInt, UpdateFlags_Mesh_Reload),
+    };
+
     static const FastPropertyDescriptor kKeyframeTracksProperties[] = {
         makeFastPropertyNoDefault<KeyframeTracksComponent, int, &KeyframeTracksComponent::index>("index", PropertyType::Int, UpdateFlags_None),
         makeFastProperty<KeyframeTracksComponent, float, &KeyframeTracksComponent::interpolation>("interpolation", PropertyType::Float, UpdateFlags_None),
@@ -1929,6 +1935,10 @@ namespace {
         return resolveDirectProperties(static_cast<BoneComponent*>(comp), propertyName, kBoneProperties);
     }
 
+    PropertyData resolveSkinPropertyFast(void* comp, const std::string& propertyName) {
+        return resolveDirectProperties(static_cast<SkinComponent*>(comp), propertyName, kSkinProperties);
+    }
+
     PropertyData resolveKeyframeTracksPropertyFast(void* comp, const std::string& propertyName) {
         KeyframeTracksComponent* trackComp = static_cast<KeyframeTracksComponent*>(comp);
         if (!trackComp) return PropertyData();
@@ -2182,6 +2192,10 @@ namespace {
 
     void enumerateBoneProperties(void* comp, std::map<std::string, PropertyData>& ps) {
         enumerateFromDescriptors(comp, ps, kBoneProperties);
+    }
+
+    void enumerateSkinProperties(void* comp, std::map<std::string, PropertyData>& ps) {
+        enumerateFromDescriptors(comp, ps, kSkinProperties);
     }
 
     void enumerateKeyframeTracksProperties(void* compRef, std::map<std::string, PropertyData>& ps) {
@@ -3190,6 +3204,7 @@ namespace {
         {ComponentType::ModelComponent, &findComponentPtr<ModelComponent>, &resolveModelPropertyFast, &enumerateModelProperties},
         {ComponentType::BundleComponent, &findComponentPtr<BundleComponent>, &resolveBundlePropertyFast, &enumerateBundleProperties},
         {ComponentType::BoneComponent, &findComponentPtr<BoneComponent>, &resolveBonePropertyFast, &enumerateBoneProperties},
+        {ComponentType::SkinComponent, &findComponentPtr<SkinComponent>, &resolveSkinPropertyFast, &enumerateSkinProperties},
         {ComponentType::KeyframeTracksComponent, &findComponentPtr<KeyframeTracksComponent>, &resolveKeyframeTracksPropertyFast, &enumerateKeyframeTracksProperties},
         {ComponentType::TranslateTracksComponent, &findComponentPtr<TranslateTracksComponent>, &resolveTranslateTracksPropertyFast, &enumerateTranslateTracksProperties},
         {ComponentType::RotateTracksComponent, &findComponentPtr<RotateTracksComponent>, &resolveRotateTracksPropertyFast, &enumerateRotateTracksProperties},
@@ -3275,6 +3290,8 @@ std::string editor::Catalog::getComponentName(ComponentType component, bool remo
         name = "Body3DComponent";
     }else if(component == ComponentType::BoneComponent){
         name = "BoneComponent";
+    }else if(component == ComponentType::SkinComponent){
+        name = "SkinComponent";
     }else if(component == ComponentType::BundleComponent){
         name = "BundleComponent";
     }else if(component == ComponentType::ButtonComponent){
@@ -3406,6 +3423,8 @@ ComponentId editor::Catalog::getComponentId(const EntityRegistry* registry, Comp
             return registry->getComponentId<Body3DComponent>();
         case ComponentType::BoneComponent:
             return registry->getComponentId<BoneComponent>();
+        case ComponentType::SkinComponent:
+            return registry->getComponentId<SkinComponent>();
         case ComponentType::BundleComponent:
             return registry->getComponentId<BundleComponent>();
         case ComponentType::ButtonComponent:
@@ -3514,6 +3533,8 @@ editor::ComponentType editor::Catalog::getComponentType(const std::string& compo
         return ComponentType::Body3DComponent;
     }else if(normalizedName == "bone"){
         return ComponentType::BoneComponent;
+    }else if(normalizedName == "skin"){
+        return ComponentType::SkinComponent;
     }else if(normalizedName == "bundle"){
         return ComponentType::BundleComponent;
     }else if(normalizedName == "button"){
@@ -3779,6 +3800,9 @@ std::vector<editor::ComponentType> editor::Catalog::findComponents(EntityRegistr
     }
     if (registry->findComponent<ScrollbarComponent>(entity)){
         ret.push_back(ComponentType::ScrollbarComponent);
+    }
+    if (registry->findComponent<SkinComponent>(entity)){
+        ret.push_back(ComponentType::SkinComponent);
     }
     if (registry->findComponent<SkyComponent>(entity)){
         ret.push_back(ComponentType::SkyComponent);
@@ -4350,7 +4374,7 @@ void editor::Catalog::copyComponent(EntityRegistry* sourceRegistry, Entity sourc
             bool model = Stream::isModelBackedMesh(sourceEntity, sourceRegistry, signature);
             bool generated = model || Stream::isGeneratedMesh(sourceRegistry, signature);
             decodeOverTarget(targetRegistry, targetEntity, compType, &Stream::decodeMeshComponent,
-                Stream::encodeMeshComponent(sourceRegistry->getComponent<MeshComponent>(sourceEntity), !generated, !model, !generated), UpdateFlags_Mesh_Reload);
+                Stream::encodeMeshComponent(sourceRegistry->getComponent<MeshComponent>(sourceEntity), !generated, !model), UpdateFlags_Mesh_Reload);
             // The model builds its submeshes again, with the overrides just copied
             ModelComponent* targetModel = targetRegistry->findComponent<ModelComponent>(targetEntity);
             if (model && targetModel) {
@@ -4544,6 +4568,15 @@ void editor::Catalog::copyComponent(EntityRegistry* sourceRegistry, Entity sourc
             targetRegistry->getComponent<BoneComponent>(targetEntity) = Stream::decodeBoneComponent(encoded);
             break;
         }
+
+        case ComponentType::SkinComponent:
+            // over the target, which keeps its palette buffer and texture; the new pose moves its bounds
+            decodeOverTarget(targetRegistry, targetEntity, compType, &Stream::decodeSkinComponent,
+                Stream::encodeSkinComponent(sourceRegistry->getComponent<SkinComponent>(sourceEntity)));
+            if (MeshComponent* mesh = targetRegistry->findComponent<MeshComponent>(targetEntity)) {
+                mesh->needUpdateAABB = true;
+            }
+            break;
 
         case ComponentType::KeyframeTracksComponent: {
             YAML::Node encoded = Stream::encodeKeyframeTracksComponent(sourceRegistry->getComponent<KeyframeTracksComponent>(sourceEntity));

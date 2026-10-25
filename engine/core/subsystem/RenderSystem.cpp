@@ -56,24 +56,24 @@ namespace {
 
     static_assert(sizeof(Matrix4) == sizeof(float) * 16);
 
-    bool bindSkinningResource(ObjectRender& render, ShaderData& shader, MeshComponent& mesh){
-        const size_t boneCount = mesh.bonesMatrix.size();
+    bool bindSkinningResource(ObjectRender& render, ShaderData& shader, SkinComponent& skin){
+        const size_t boneCount = skin.bonesMatrix.size();
         const unsigned int size = static_cast<unsigned int>(boneCount * sizeof(Matrix4));
         const int storageSlot = shader.getStorageBufferIndex(StorageBufferType::VS_SKINNING);
         if (storageSlot != -1){
-            if (!mesh.bonesBuffer.isCreated() &&
-                    !mesh.bonesBuffer.createBuffer(size, nullptr, BufferType::STORAGE_BUFFER, BufferUsage::STREAM))
+            if (!skin.bonesBuffer.isCreated() &&
+                    !skin.bonesBuffer.createBuffer(size, nullptr, BufferType::STORAGE_BUFFER, BufferUsage::STREAM))
                 return false;
-            render.addStorageBuffer(storageSlot, ShaderStageType::VERTEX, &mesh.bonesBuffer);
+            render.addStorageBuffer(storageSlot, ShaderStageType::VERTEX, &skin.bonesBuffer);
         }else{
             const auto textureSlot = shader.getTextureIndex(TextureShaderType::BONES);
-            if (textureSlot.first == -1 || (!mesh.bonesTexture.isCreated() &&
-                    !mesh.bonesTexture.createDynamicTexture("mesh-bones", 4,
+            if (textureSlot.first == -1 || (!skin.bonesTexture.isCreated() &&
+                    !skin.bonesTexture.createDynamicTexture("mesh-bones", 4,
                         static_cast<int>(boneCount))))
                 return false;
-            render.addTexture(textureSlot, ShaderStageType::VERTEX, &mesh.bonesTexture);
+            render.addTexture(textureSlot, ShaderStageType::VERTEX, &skin.bonesTexture);
         }
-        mesh.needUpdateBones = true;
+        skin.needUpdateBones = true;
         return true;
     }
 
@@ -2949,6 +2949,8 @@ bool RenderSystem::loadMesh(Entity entity, MeshComponent& mesh, uint16_t pipelin
         }
     }
 
+    SkinComponent* skin = findComponent<SkinComponent>(scene, entity, signature);
+
     for (int i = 0; i < mesh.numSubmeshes; i++){
 
         ObjectRender& render = mesh.submeshes[i].render;
@@ -3042,6 +3044,10 @@ bool RenderSystem::loadMesh(Entity entity, MeshComponent& mesh, uint16_t pipelin
             if (attr.first == AttributeType::MORPHTANGENT0){
                 mesh.submeshes[i].hasMorphTangent = true;
             }
+        }
+        // without a SkinComponent there is no palette, so the mesh draws in its bind pose
+        if (!skin){
+            mesh.submeshes[i].hasSkinning = false;
         }
 
         if (!mesh.submeshes[i].material.normalTexture.empty()){
@@ -3246,7 +3252,7 @@ bool RenderSystem::loadMesh(Entity entity, MeshComponent& mesh, uint16_t pipelin
         }
         if (mesh.submeshes[i].hasSkinning){
             mesh.submeshes[i].slotVSSkinning = shaderData.getUniformBlockIndex(UniformBlockType::VS_SKINNING);
-            if (!bindSkinningResource(render, shaderData, mesh))
+            if (!bindSkinningResource(render, shaderData, *skin))
                 return false;
         }
         if (mesh.submeshes[i].hasMorphTarget){
@@ -3384,7 +3390,7 @@ bool RenderSystem::loadMesh(Entity entity, MeshComponent& mesh, uint16_t pipelin
 
             if (mesh.submeshes[i].hasSkinning){
                 mesh.submeshes[i].slotVSDepthSkinning = depthShaderData.getUniformBlockIndex(UniformBlockType::DEPTH_VS_SKINNING);
-                if (!bindSkinningResource(depthRender, depthShaderData, mesh))
+                if (!bindSkinningResource(depthRender, depthShaderData, *skin))
                     return false;
             }
             if (mesh.submeshes[i].hasMorphTarget){
@@ -3506,7 +3512,7 @@ bool RenderSystem::loadMesh(Entity entity, MeshComponent& mesh, uint16_t pipelin
 
             if (mesh.submeshes[i].hasSkinning){
                 mesh.submeshes[i].slotVSGBufferSkinning = gbufferShaderData.getUniformBlockIndex(UniformBlockType::DEPTH_VS_SKINNING);
-                if (!bindSkinningResource(gbufferRender, gbufferShaderData, mesh))
+                if (!bindSkinningResource(gbufferRender, gbufferShaderData, *skin))
                     return false;
             }
             if (mesh.submeshes[i].hasMorphTarget){
@@ -4098,16 +4104,6 @@ void RenderSystem::drawSubmeshGeometry(ObjectRender& render, MeshComponent& mesh
 // ranges would slice the previous upload with the new offsets. Sokol allows a single
 // update per buffer per frame, which the flag already guarantees.
 void RenderSystem::updateMeshBuffers(MeshComponent& mesh){
-    if (mesh.needUpdateBones){
-        const unsigned int size = static_cast<unsigned int>(
-            mesh.bonesMatrix.size() * sizeof(Matrix4));
-        if (mesh.bonesBuffer.isCreated())
-            mesh.bonesBuffer.updateBuffer(size, mesh.bonesMatrix.data());
-        if (mesh.bonesTexture.isCreated())
-            mesh.bonesTexture.updateTexture(mesh.bonesMatrix.data(), size);
-        mesh.needUpdateBones = false;
-    }
-
     if (!mesh.needUpdateBuffer)
         return;
 
@@ -4158,6 +4154,26 @@ void RenderSystem::updateInstanceBuffers(){
         }
         view.buffer.setData((unsigned char*)view.data.data(), size);
         render->updateBuffer(size, view.buffer.getData());
+    }
+}
+
+// Once per frame, before any pass, as with the instance buffers.
+void RenderSystem::updateSkinBuffers(){
+    auto skins = scene->getComponentArray<SkinComponent>();
+
+    for (int i = 0; i < skins->size(); i++){
+        SkinComponent& skin = skins->getComponentFromIndex(i);
+
+        if (!skin.needUpdateBones)
+            continue;
+
+        const unsigned int size = static_cast<unsigned int>(
+            skin.bonesMatrix.size() * sizeof(Matrix4));
+        if (skin.bonesBuffer.isCreated())
+            skin.bonesBuffer.updateBuffer(size, skin.bonesMatrix.data());
+        if (skin.bonesTexture.isCreated())
+            skin.bonesTexture.updateTexture(skin.bonesMatrix.data(), size);
+        skin.needUpdateBones = false;
     }
 }
 
@@ -5822,8 +5838,10 @@ void RenderSystem::destroyMesh(Entity entity, MeshComponent& mesh, bool clearAss
     }
     mesh.buffer.getRender()->destroyBuffer();
     mesh.indices.getRender()->destroyBuffer();
-    mesh.bonesBuffer.destroyBuffer();
-    mesh.bonesTexture.destroyTexture();
+    if (SkinComponent* skin = scene->findComponent<SkinComponent>(entity)){
+        skin->bonesBuffer.destroyBuffer();
+        skin->bonesTexture.destroyTexture();
+    }
     for (int i = 0; i < mesh.numExternalBuffers; i++){
         if (!preserveAssets){
             mesh.eBuffers[i].clearAll();
@@ -9170,8 +9188,9 @@ void RenderSystem::update(double dt){
         ModelComponent& model = models->getComponentFromIndex(i);
         for (const ModelSkinBinding& binding : model.skinBindings) {
             MeshComponent* mesh = scene->findComponent<MeshComponent>(binding.mesh);
+            SkinComponent* skin = scene->findComponent<SkinComponent>(binding.mesh);
             Transform* meshTransform = scene->findComponent<Transform>(binding.mesh);
-            if (!mesh || !meshTransform)
+            if (!mesh || !skin || !meshTransform)
                 continue;
 
             bool dirty = meshTransform->needUpdate;
@@ -9191,13 +9210,13 @@ void RenderSystem::update(double dt){
 
             const size_t jointCount = std::min(binding.joints.size(), binding.inverseBindMatrices.size());
             for (size_t jointIndex = 0; jointIndex < jointCount &&
-                    mesh->bonesMatrix.validIndex(static_cast<int>(jointIndex)); jointIndex++) {
+                    skin->bonesMatrix.validIndex(static_cast<int>(jointIndex)); jointIndex++) {
                 Transform* jointTransform = scene->findComponent<Transform>(binding.joints[jointIndex]);
                 if (jointTransform)
-                    mesh->bonesMatrix[jointIndex] = inverseMeshTransform * jointTransform->modelMatrix *
+                    skin->bonesMatrix[jointIndex] = inverseMeshTransform * jointTransform->modelMatrix *
                         binding.inverseBindMatrices[jointIndex];
             }
-            mesh->needUpdateBones = true;
+            skin->needUpdateBones = true;
             mesh->needUpdateAABB = true;
         }
     }
@@ -9563,23 +9582,24 @@ void RenderSystem::update(double dt){
                 // too, but unions body-sized boxes over the skeleton. Local space so the editor
                 // draws the same box.
                 mesh.skinnedAABB.setNull();
-                // in exports bonesMatrix.size() is the capacity, so rigid meshes skip the bones
+                // the palette only moves submeshes drawn with skinning
+                SkinComponent* skin = findComponent<SkinComponent>(scene, entity, signature);
                 bool skinned = false;
                 for (unsigned int s = 0; s < mesh.numSubmeshes; s++){
                     skinned = skinned || mesh.submeshes[s].hasSkinning;
                 }
-                if (!instmesh && skinned){
-                    const size_t boneBounds = std::min(mesh.bonesAABB.size(), mesh.bonesMatrix.size());
+                if (!instmesh && skin && skinned){
+                    const size_t boneBounds = std::min(skin->bonesAABB.size(), skin->bonesMatrix.size());
                     for (size_t b = 0; b < boneBounds; b++){
-                        if (!mesh.bonesAABB[b].isNull()){
-                            mesh.skinnedAABB.merge(mesh.bonesMatrix[b] * mesh.bonesAABB[b]);
+                        if (!skin->bonesAABB[b].isNull()){
+                            mesh.skinnedAABB.merge(skin->bonesMatrix[b] * skin->bonesAABB[b]);
                         }
                     }
 
                     if (mesh.skinnedAABB.isNull()){ // no per-bone bounds to pose
                         const Matrix4 identityMatrix;
-                        for (size_t b = 0; b < mesh.bonesMatrix.size(); b++){
-                            const Matrix4& bone = mesh.bonesMatrix[b];
+                        for (size_t b = 0; b < skin->bonesMatrix.size(); b++){
+                            const Matrix4& bone = skin->bonesMatrix[b];
                             if (bone != identityMatrix){
                                 mesh.skinnedAABB.merge(bone * mesh.aabb);
                             }
@@ -9740,11 +9760,13 @@ void RenderSystem::update(double dt){
                     if (model && model->skinBindings.empty()) {
                         Matrix4 skinning = model->inverseDerivedTransform * transform.modelMatrix * bone.offsetMatrix;
 
-                        auto updateDrivenMesh = [&](MeshComponent* drivenMesh) {
-                            if (!drivenMesh || !drivenMesh->bonesMatrix.validIndex(bone.index))
+                        auto updateDrivenMesh = [&](Entity meshEntity) {
+                            MeshComponent* drivenMesh = scene->findComponent<MeshComponent>(meshEntity);
+                            SkinComponent* skin = scene->findComponent<SkinComponent>(meshEntity);
+                            if (!drivenMesh || !skin || !skin->bonesMatrix.validIndex(bone.index))
                                 return;
-                            drivenMesh->bonesMatrix[bone.index] = skinning;
-                            drivenMesh->needUpdateBones = true;
+                            skin->bonesMatrix[bone.index] = skinning;
+                            skin->needUpdateBones = true;
                             drivenMesh->needUpdateAABB = true;
                         };
 
@@ -9755,10 +9777,10 @@ void RenderSystem::update(double dt){
                         // A moved bone changes the skinned bounds, so flag the driven mesh(es)
                         // for a world-AABB rebuild. Bones are processed after their mesh in this
                         // loop, so this takes effect next frame with the fresh bonesMatrix.
-                        updateDrivenMesh(scene->findComponent<MeshComponent>(bone.model));
+                        updateDrivenMesh(bone.model);
 
                         for (auto const& meshNode : model->meshNodesMapping){
-                            updateDrivenMesh(scene->findComponent<MeshComponent>(meshNode.second));
+                            updateDrivenMesh(meshNode.second);
                         }
                     }
                 }
@@ -9814,6 +9836,7 @@ void RenderSystem::draw(){
         }
     }
     updateInstanceBuffers();
+    updateSkinBuffers();
 
     // free the fixed-resolution target when the setting is turned off (the blit
     // pipeline itself is kept; it is cheap and may be re-enabled)
@@ -10745,6 +10768,13 @@ void RenderSystem::onComponentAdded(Entity entity, ComponentId componentId) {
     } else if (componentId == scene->getComponentId<ReflectionProbeComponent>()) {
         hasReflectionProbes = true;
         needReloadMeshes();
+    } else if (componentId == scene->getComponentId<SkinComponent>()) {
+        // a loaded mesh binds the palette on reload, and its bounds take the pose
+        if (MeshComponent* mesh = scene->findComponent<MeshComponent>(entity)) {
+            if (mesh->loaded)
+                mesh->needReload = true;
+            mesh->needUpdateAABB = true;
+        }
     }
 }
 
@@ -10789,5 +10819,15 @@ void RenderSystem::onComponentRemoved(Entity entity, ComponentId componentId) {
         destroyWater(entity, water);
         // a mirror on the same entity recreates its camera next frame
         destroyMirrorCamera(entity);
+    } else if (componentId == scene->getComponentId<SkinComponent>()) {
+        SkinComponent& skin = scene->getComponent<SkinComponent>(entity);
+        skin.bonesBuffer.destroyBuffer();
+        skin.bonesTexture.destroyTexture();
+        // a loaded mesh still binds the destroyed palette, and its bounds drop the pose
+        if (MeshComponent* mesh = scene->findComponent<MeshComponent>(entity)) {
+            if (mesh->loaded)
+                mesh->needReload = true;
+            mesh->needUpdateAABB = true;
+        }
     }
 }

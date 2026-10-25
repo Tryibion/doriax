@@ -3506,8 +3506,12 @@ void editor::Project::calculateMaxValues(const EntityRegistry* registry, SceneMa
         const MeshComponent& mesh = meshes->getComponentFromIndex(i);
         maxValues.maxSubmeshes = std::max(maxValues.maxSubmeshes, mesh.numSubmeshes);
         maxValues.maxExternalBuffers = std::max(maxValues.maxExternalBuffers, mesh.numExternalBuffers);
+    }
+
+    auto skins = registry->getComponentArray<SkinComponent>();
+    for (size_t i = 0; i < skins->size(); ++i) {
         maxValues.maxBones = std::max(maxValues.maxBones,
-            static_cast<unsigned int>(mesh.bonesMatrix.size()));
+            static_cast<unsigned int>(skins->getComponentFromIndex(i).bonesMatrix.size()));
     }
 
     // models are not loaded on a command line export

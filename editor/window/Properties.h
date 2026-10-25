@@ -411,6 +411,7 @@ namespace doriax::editor{
         void drawAnimationComponent(ComponentType cpType, SceneProject* sceneProject, std::vector<Entity> entities);
         void drawBundleComponent(ComponentType cpType, SceneProject* sceneProject, std::vector<Entity> entities);
         void drawBoneComponent(ComponentType cpType, SceneProject* sceneProject, std::vector<Entity> entities);
+        void drawSkinComponent(ComponentType cpType, SceneProject* sceneProject, std::vector<Entity> entities);
         void drawKeyframeTracksComponent(ComponentType cpType, SceneProject* sceneProject, std::vector<Entity> entities);
         // onRemoveValue/onAddValue let the caller add companion property commands
         // (same undo step) when an entry is deleted or appended, e.g. keyframe

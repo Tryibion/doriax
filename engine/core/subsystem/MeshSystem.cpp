@@ -2660,7 +2660,7 @@ static bool readAttributeElement(Buffer* buffer, const Attribute& attribute, uns
     return true;
 }
 
-void MeshSystem::calculateMeshAABB(MeshComponent& mesh){
+void MeshSystem::calculateMeshAABB(MeshComponent& mesh, SkinComponent* skin){
     std::map<std::string, Buffer*> buffers;
 
     if (mesh.buffer.getSize() > 0){
@@ -2682,7 +2682,8 @@ void MeshSystem::calculateMeshAABB(MeshComponent& mesh){
 
     // not AABB::ZERO, a box at the origin that every merge would keep
     mesh.verticesAABB.setNull();
-    mesh.bonesAABB.clear();
+    if (skin)
+        skin->bonesAABB.clear();
     mesh.skinnedAABB.setNull(); // reposed on the next RenderSystem update
 
     for (size_t i = 0; i < mesh.numSubmeshes; i++) {
@@ -2711,11 +2712,11 @@ void MeshSystem::calculateMeshAABB(MeshComponent& mesh){
 
         // bounds of the vertices each bone influences, posed by RenderSystem
         unsigned int influences = 0;
-        if (boneIdBuffer && boneWeightBuffer){
+        if (skin && boneIdBuffer && boneWeightBuffer){
             influences = std::min(boneIdAttr.getElements(), boneWeightAttr.getElements());
         }
-        if (influences > 0 && mesh.bonesAABB.empty())
-            mesh.bonesAABB.resize(mesh.bonesMatrix.size());
+        if (influences > 0 && skin->bonesAABB.empty())
+            skin->bonesAABB.resize(skin->bonesMatrix.size());
 
         int verticesize = int(vertexAttr.getCount());
         for (int v = 0; v < verticesize; v++){
@@ -2730,8 +2731,8 @@ void MeshSystem::calculateMeshAABB(MeshComponent& mesh){
                 if (!readAttributeElement(boneIdBuffer, boneIdAttr, v, e, boneId)) continue;
 
                 int bone = (int)boneId;
-                if (bone >= 0 && static_cast<size_t>(bone) < mesh.bonesAABB.size()){
-                    mesh.bonesAABB[bone].merge(position);
+                if (bone >= 0 && static_cast<size_t>(bone) < skin->bonesAABB.size()){
+                    skin->bonesAABB[bone].merge(position);
                 }
             }
         }
@@ -4525,8 +4526,10 @@ bool MeshSystem::loadGLTF(Entity entity, const std::string filename, bool asyncL
         rootMesh->numExternalBuffers = 0;
         rootMesh->normAdjustJoint = 1.0f;
         rootMesh->normAdjustWeight = 1.0f;
-        rootMesh->bonesMatrix = HybridArray<Matrix4, MAX_BONES>();
-        rootMesh->needUpdateBones = false;
+    }
+    // added again below when the loaded mesh is skinned
+    if (!Engine::isAsyncThread() && scene->findComponent<SkinComponent>(entity)) {
+        scene->removeComponent<SkinComponent>(entity);
     }
 
     destroyModel(model);
@@ -4849,7 +4852,7 @@ bool MeshSystem::loadGLTF(Entity entity, const std::string filename, bool asyncL
                 if (model.gltfModel->nodes[nodeIdx].skin >= 0) {
                     // Skinned nodes ignore their own transform (glTF spec): the skeleton drives the
                     // vertices in the model's space, so the child stays at identity under the root.
-                    // Its bonesMatrix is filled from the shared skeleton at render time.
+                    // Its SkinComponent is filled from the shared skeleton at render time.
                     childTransform.position = Vector3::ZERO;
                     childTransform.rotation = Quaternion::IDENTITY;
                     childTransform.scale    = Vector3::UNIT_SCALE;
@@ -4883,8 +4886,9 @@ bool MeshSystem::loadGLTF(Entity entity, const std::string filename, bool asyncL
             mesh.numExternalBuffers = 0;
             mesh.normAdjustJoint = 1.0f;
             mesh.normAdjustWeight = 1.0f;
-            mesh.bonesMatrix = HybridArray<Matrix4, MAX_BONES>();
-            mesh.needUpdateBones = false;
+            if (scene->findComponent<SkinComponent>(meshEntity)) {
+                scene->removeComponent<SkinComponent>(meshEntity);
+            }
 
             mesh.numSubmeshes = static_cast<unsigned int>(gltfmesh.primitives.size());
             if (mesh.numSubmeshes > 0 && !mesh.submeshes.validIndex(static_cast<int>(mesh.numSubmeshes) - 1)) {
@@ -4909,16 +4913,22 @@ bool MeshSystem::loadGLTF(Entity entity, const std::string filename, bool asyncL
         }
 
         if (!bakingFlatten && nodeSkin && !nodeSkin->joints.empty()){
+            if (!scene->findComponent<SkinComponent>(meshEntity)) {
+                scene->addComponent<SkinComponent>(meshEntity);
+            }
+            SkinComponent& skin = scene->getComponent<SkinComponent>(meshEntity);
             const int lastBone = static_cast<int>(nodeSkin->joints.size()) - 1;
-            if (!mesh.bonesMatrix.validIndex(lastBone)){
+            if (!skin.bonesMatrix.validIndex(lastBone)){
                 Log::error("Model %s has more bones than the maximum allowed (%zu)",
-                    filename.c_str(), mesh.bonesMatrix.size());
+                    filename.c_str(), skin.bonesMatrix.size());
                 if (asyncLoad) {
                     ResourceProgress::failBuild(buildId);
                 }
                 return false;
             }
-            mesh.bonesMatrix[lastBone].identity();
+            skin.bonesMatrix[lastBone].identity();
+            // nodes merged into one mesh share its palette
+            skin.numBones = std::max(skin.numBones, static_cast<unsigned int>(lastBone + 1));
         }
 
         for (size_t p = 0; p < gltfmesh.primitives.size(); p++) {
@@ -5342,7 +5352,7 @@ bool MeshSystem::loadGLTF(Entity entity, const std::string filename, bool asyncL
         if (useChildEntities) {
             mesh.numSubmeshes = submeshIndex; // reserved-but-skipped slots (invalid data) dropped
             std::reverse(mesh.submeshes.data(), mesh.submeshes.data() + mesh.numSubmeshes);
-            calculateMeshAABB(mesh);
+            calculateMeshAABB(mesh, scene->findComponent<SkinComponent>(meshEntity));
             mesh.needReload = true;
         }
 
@@ -5406,11 +5416,11 @@ bool MeshSystem::loadGLTF(Entity entity, const std::string filename, bool asyncL
 
             if (Engine::isAsyncThread()) {
                 // Off-thread skinned previews are baked into static geometry above (skinning attributes
-                // dropped), so there is no skeleton to pose and bonesMatrix stays at the identity it was
-                // reset to at load start. Just refresh the transform so the preview gets framed.
+                // dropped), so there is no skeleton to pose and no SkinComponent. Just refresh the
+                // transform so the preview gets framed.
                 transform.needUpdate = true;
             } else if (model.skeleton != NULL_ENTITY) {
-                // Repopulate bonesMatrix before the first render frame. loadGLTF reset every bonesMatrix
+                // Repopulate the skin palettes before the first render frame. loadGLTF reset every palette
                 // to identity above, so RenderSystem must recompute the skinning matrices: flag the
                 // model transform (so its inverseDerivedTransform is refreshed) and every bone transform
                 // for update. This also covers reopening a saved project (skipEntities), where the
@@ -5721,7 +5731,7 @@ bool MeshSystem::loadGLTF(Entity entity, const std::string filename, bool asyncL
 
         std::reverse(mesh.submeshes.data(), mesh.submeshes.data() + mesh.numSubmeshes);
 
-        calculateMeshAABB(mesh);
+        calculateMeshAABB(mesh, scene->findComponent<SkinComponent>(entity));
 
         if (mesh.loaded)
             mesh.needReload = true;
@@ -6484,7 +6494,7 @@ void MeshSystem::update(double dt){
         MeshComponent& mesh = meshes->getComponentFromIndex(i);
 
         if (mesh.aabb == AABB::ZERO){
-            calculateMeshAABB(mesh);
+            calculateMeshAABB(mesh, scene->findComponent<SkinComponent>(meshes->getEntity(i)));
         }
 
         for (unsigned int s = 0; s < mesh.numSubmeshes; s++){

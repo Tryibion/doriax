@@ -74,6 +74,7 @@ void ComponentAddDialog::initializeCategories() {
             {ComponentType::RotationActionComponent, ICON_FA_ROTATE, "Rotation Action", "Rotation animation", ImVec4(0.85f, 0.75f, 0.3f, 1.0f)},
             {ComponentType::ScaleActionComponent, ICON_FA_EXPAND, "Scale Action", "Scale animation", ImVec4(0.9f, 0.65f, 0.35f, 1.0f)},
             {ComponentType::BoneComponent, ICON_FA_BONE, "Bone", "Skeletal bone", ImVec4(0.9f, 0.9f, 0.8f, 1.0f)},
+            {ComponentType::SkinComponent, ICON_FA_PERSON_RUNNING, "Skin", "Bone palette of a skinned mesh", ImVec4(0.85f, 0.85f, 0.75f, 1.0f)},
             {ComponentType::KeyframeTracksComponent, ICON_FA_KEY, "Keyframe Tracks", "Keyframe animation", ImVec4(0.8f, 0.6f, 0.3f, 1.0f)},
             {ComponentType::MorphTracksComponent, ICON_FA_FACE_SMILE, "Morph Tracks", "Morph targets", ImVec4(0.7f, 0.65f, 0.4f, 1.0f)},
             {ComponentType::RotateTracksComponent, ICON_FA_CIRCLE_NOTCH, "Rotate Tracks", "Rotation tracks", ImVec4(0.75f, 0.6f, 0.35f, 1.0f)},

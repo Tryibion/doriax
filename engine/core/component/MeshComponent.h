@@ -185,10 +185,6 @@ namespace doriax{
         ShaderUniformValues shaderUniforms;
         bool needUpdateShaderUniforms = false;
 
-        HybridArray<Matrix4, MAX_BONES> bonesMatrix;
-        BufferRender bonesBuffer;
-        TextureRender bonesTexture;
-        bool needUpdateBones = false;
         float normAdjustJoint = 1;
         float normAdjustWeight = 1;
 
@@ -203,7 +199,6 @@ namespace doriax{
         AABB verticesAABB = AABB::ZERO; // is not influenced by instances
         AABB worldAABB; // initially NULL
 
-        std::vector<AABB> bonesAABB; // bind-pose bounds per bone index, empty when not skinned
         AABB skinnedAABB; // local bounds of the posed mesh, null when not skinned
 
         bool receiveLights = true;

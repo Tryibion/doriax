@@ -13099,6 +13099,13 @@ void editor::Properties::drawBoneComponent(ComponentType cpType, SceneProject* s
     endTable();
 }
 
+void editor::Properties::drawSkinComponent(ComponentType cpType, SceneProject* sceneProject, std::vector<Entity> entities){
+    // the model fills the palette, nothing here is edited
+    beginTable(cpType, getLabelSize("Bones"));
+    propertyRow(RowPropertyType::Label, cpType, "numBones", "Bones", sceneProject, entities);
+    endTable();
+}
+
 void editor::Properties::drawKeyframeTracksComponent(ComponentType cpType, SceneProject* sceneProject, std::vector<Entity> entities){
     KeyframeTracksComponent& comp = sceneProject->scene->getComponent<KeyframeTracksComponent>(entities[0]);
 
@@ -14019,6 +14026,8 @@ void editor::Properties::show(){
                     drawBundleComponent(cpType, sceneProject, entities);
                 }else if (cpType == ComponentType::BoneComponent){
                     drawBoneComponent(cpType, sceneProject, entities);
+                }else if (cpType == ComponentType::SkinComponent){
+                    drawSkinComponent(cpType, sceneProject, entities);
                 }else if (cpType == ComponentType::KeyframeTracksComponent){
                     drawKeyframeTracksComponent(cpType, sceneProject, entities);
                 }else if (cpType == ComponentType::TranslateTracksComponent){

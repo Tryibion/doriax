@@ -120,7 +120,8 @@ namespace doriax::editor{
         // position in EntityBundle's in-memory component override mask.
         ReflectionProbeComponent,
         WaterComponent,
-        WaterExclusionComponent
+        WaterExclusionComponent,
+        SkinComponent
     };
 
     enum class PropertyType{
