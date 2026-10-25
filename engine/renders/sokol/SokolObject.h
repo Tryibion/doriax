@@ -13,6 +13,7 @@
 #include "sokol_gfx.h"
 
 #include <map>
+#include <memory>
 #include <tuple>
 
 
@@ -59,7 +60,7 @@ namespace doriax{
         sg_pipeline zprepass_pip;
         sg_pipeline zprepass_rtt_pip;
 
-        sg_pipeline_desc pipeline_desc;
+        std::unique_ptr<sg_pipeline_desc> loadPipelineDesc; // only while loading
 
         size_t bindSlotIndex;
 
@@ -71,6 +72,8 @@ namespace doriax{
         sg_cull_mode getCullMode(CullingMode cullingMode);
         sg_face_winding getFaceWinding(WindingOrder windingOrder);
         sg_pipeline getPipeline(PipelineType pipType) const;
+        sg_pipeline_desc& loadingDesc();
+        bool makePipelines(const sg_pipeline_desc& pipeline_desc, uint16_t pipelines, bool enableFaceCulling, bool enableDepthWrite, CullingMode cullingMode, WindingOrder windingOrder, bool prepassFaceCulling);
 
     public:
 

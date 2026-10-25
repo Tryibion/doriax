@@ -99,7 +99,6 @@ SokolObject::SokolObject(){
     bind = {};
     loadIndexBuffer.id = SG_INVALID_ID;
     loadIndexOffset = 0;
-    pipeline_desc = {};
     bindSlotIndex = 0;
 }
 
@@ -119,7 +118,7 @@ SokolObject::SokolObject(const SokolObject& rhs) {
     rtt_coloronly_pip = rhs.rtt_coloronly_pip;
     zprepass_pip = rhs.zprepass_pip;
     zprepass_rtt_pip = rhs.zprepass_rtt_pip;
-    pipeline_desc = rhs.pipeline_desc;
+    loadPipelineDesc.reset(rhs.loadPipelineDesc ? new sg_pipeline_desc(*rhs.loadPipelineDesc) : nullptr);
     bindSlotIndex = rhs.bindSlotIndex;
     bufferToBindSlot = rhs.bufferToBindSlot;
 }
@@ -140,7 +139,7 @@ SokolObject& SokolObject::operator=(const SokolObject& rhs) {
     rtt_coloronly_pip = rhs.rtt_coloronly_pip;
     zprepass_pip = rhs.zprepass_pip;
     zprepass_rtt_pip = rhs.zprepass_rtt_pip;
-    pipeline_desc = rhs.pipeline_desc;
+    loadPipelineDesc.reset(rhs.loadPipelineDesc ? new sg_pipeline_desc(*rhs.loadPipelineDesc) : nullptr);
     bindSlotIndex = rhs.bindSlotIndex;
     bufferToBindSlot = rhs.bufferToBindSlot;
     
@@ -222,16 +221,23 @@ void SokolObject::beginLoad(PrimitiveType primitiveType){
     rtt_pip = {0};
     rtt_invert_pip = {0};
     gbuffer_pip = {0};
-    pipeline_desc = {0};
+    loadPipelineDesc = std::make_unique<sg_pipeline_desc>();
 
-    pipeline_desc.primitive_type = getPrimitiveType(primitiveType);
+    loadPipelineDesc->primitive_type = getPrimitiveType(primitiveType);
 
     bindSlotIndex = 0;
     bufferToBindSlot.clear();
 }
 
+// only kept from beginLoad to endLoad: every object would otherwise hold one for life
+sg_pipeline_desc& SokolObject::loadingDesc(){
+    if (!loadPipelineDesc)
+        loadPipelineDesc = std::make_unique<sg_pipeline_desc>();
+    return *loadPipelineDesc;
+}
+
 void SokolObject::setShader(ShaderRender* shader){
-    pipeline_desc.shader = shader->backend.get();
+    loadingDesc().shader = shader->backend.get();
 }
 
 void SokolObject::setIndex(BufferRender* buffer, AttributeDataType dataType, size_t offset){
@@ -242,11 +248,11 @@ void SokolObject::setIndex(BufferRender* buffer, AttributeDataType dataType, siz
     loadIndexOffset = offset;
 
     if (dataType == AttributeDataType::UNSIGNED_SHORT){
-        pipeline_desc.index_type = SG_INDEXTYPE_UINT16;
+        loadingDesc().index_type = SG_INDEXTYPE_UINT16;
     }else if (dataType == AttributeDataType::UNSIGNED_INT){
-        pipeline_desc.index_type = SG_INDEXTYPE_UINT32;
+        loadingDesc().index_type = SG_INDEXTYPE_UINT32;
     }else{
-        pipeline_desc.index_type = SG_INDEXTYPE_NONE;
+        loadingDesc().index_type = SG_INDEXTYPE_NONE;
     }
 }
 
@@ -275,10 +281,10 @@ void SokolObject::addAttribute(int slot, BufferRender* buffer, unsigned int elem
             bind.vertex_buffer_offsets[bindSlotIndex] = bufferOffset;
             bufferToBindSlot[info] = bindSlotIndex;
 
-            pipeline_desc.layout.buffers[bindSlotIndex].stride = stride;
+            loadingDesc().layout.buffers[bindSlotIndex].stride = stride;
 
             if (perInstance){
-                pipeline_desc.layout.buffers[bindSlotIndex].step_func = SG_VERTEXSTEP_PER_INSTANCE;
+                loadingDesc().layout.buffers[bindSlotIndex].step_func = SG_VERTEXSTEP_PER_INSTANCE;
             }
 
             bindSlotIndex++;
@@ -286,9 +292,10 @@ void SokolObject::addAttribute(int slot, BufferRender* buffer, unsigned int elem
 
         size_t indexBuf = bufferToBindSlot[info];
 
-        pipeline_desc.layout.attrs[slot].buffer_index = indexBuf;
-        pipeline_desc.layout.attrs[slot].offset = attrOffset;
-        pipeline_desc.layout.attrs[slot].format = getVertexFormat(elements, dataType, normalized);
+        sg_pipeline_desc& desc = loadingDesc();
+        desc.layout.attrs[slot].buffer_index = indexBuf;
+        desc.layout.attrs[slot].offset = attrOffset;
+        desc.layout.attrs[slot].format = getVertexFormat(elements, dataType, normalized);
     }
 }
 
@@ -340,6 +347,12 @@ void SokolObject::addTexture(std::pair<int, int> slot, ShaderStageType stage, Te
 }
 
 bool SokolObject::endLoad(uint16_t pipelines, bool enableFaceCulling, bool enableDepthWrite, CullingMode cullingMode, WindingOrder windingOrder, bool prepassFaceCulling){
+    const bool loaded = makePipelines(loadingDesc(), pipelines, enableFaceCulling, enableDepthWrite, cullingMode, windingOrder, prepassFaceCulling);
+    loadPipelineDesc.reset();
+    return loaded;
+}
+
+bool SokolObject::makePipelines(const sg_pipeline_desc& pipeline_desc, uint16_t pipelines, bool enableFaceCulling, bool enableDepthWrite, CullingMode cullingMode, WindingOrder windingOrder, bool prepassFaceCulling){
 
     if (pipelines & (int)PipelineType::PIP_DEPTH) {
         sg_pipeline_desc pip_depth_desc = pipeline_desc;
@@ -653,6 +666,6 @@ void SokolObject::destroy(){
     zprepass_pip.id = SG_INVALID_ID;
     zprepass_rtt_pip.id = SG_INVALID_ID;
     bind = {};
-    pipeline_desc = {};
+    loadPipelineDesc.reset();
     bindSlotIndex = 0;
 }
