@@ -2738,6 +2738,9 @@ void AiChatWindow::autoRunProposals() {
             bool eligible = (mode == ai::ApprovalMode::FullAgent) ||
                             (mode == ai::ApprovalMode::SafeAutoRun && proposal.readOnly);
             if (eligible) {
+                if (ai::EditorActionExecutor::isBlockedBySave(project, proposal.toolName)) {
+                    return; // runs after the scene save
+                }
                 nextId = proposal.id;
                 break;
             }

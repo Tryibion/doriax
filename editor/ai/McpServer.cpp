@@ -492,6 +492,11 @@ void McpServer::runCall(const std::shared_ptr<PendingCall>& call) {
         getEditorHost().enqueueMainThreadTask([this, call]() { runCall(call); });
         return;
     }
+    // Waits for the scene save instead of failing
+    if (EditorActionExecutor::isBlockedBySave(project, call->name)) {
+        getEditorHost().enqueueMainThreadTask([this, call]() { runCall(call); });
+        return;
+    }
     if (call->claimed.exchange(true)) return;
 
     // Changes may have been turned off while the call waited

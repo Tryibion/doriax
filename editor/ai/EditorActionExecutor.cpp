@@ -1422,6 +1422,7 @@ constexpr const char* kUnsavedScriptEdits = "A script open in the code editor ha
 constexpr const char* kProjectChangeBusy = "The editor is already switching projects. Try again once it has loaded.";
 constexpr const char* kRefusedUndo = "The last command cannot be undone now. Check read_output_log for the reason.";
 constexpr const char* kRefusedRedo = "The next command no longer applies. Check read_output_log for the reason.";
+constexpr const char* kRefusedCommand = "The editor refused the change. Check read_output_log for the reason.";
 
 // isAnyScenePlaying() is also true while a scene saves or loads
 std::string busyError(Project* project, const std::string& action) {
@@ -2305,6 +2306,10 @@ void EditorActionExecutor::logFailure(const ActionResult& result, const std::str
     }
 }
 
+bool EditorActionExecutor::isBlockedBySave(Project* project, const std::string& name) {
+    return project->isAnySceneSaving() && !EditorActionRegistry::isReadOnly(name);
+}
+
 ActionResult EditorActionExecutor::execute(const std::string& name,
                                            const Json& arguments,
                                            const std::atomic<bool>* cancel) {
@@ -2331,6 +2336,10 @@ ActionResult EditorActionExecutor::dispatch(const std::string& name,
 
     if (!project) {
         return failResult("No project is available.");
+    }
+
+    if (isBlockedBySave(project, name)) {
+        return failResult(busyError(project, name));
     }
 
     if (name == "get_project_summary") return getProjectSummary();
@@ -2753,7 +2762,9 @@ ActionResult EditorActionExecutor::deleteEntity(const Json& arguments) {
     if (!sceneProject || !sceneProject->scene) return failResult("Scene not found.");
     Entity entity = resolveEntity(sceneProject, arguments);
     if (entity == NULL_ENTITY) return failResult("Entity not found.");
-    CommandHandle::get(sceneId)->addCommandNoMerge(new DeleteEntityCmd(project, sceneId, entity));
+    if (!CommandHandle::get(sceneId)->addCommandNoMerge(new DeleteEntityCmd(project, sceneId, entity))) {
+        return failResult(kRefusedCommand);
+    }
     return okResult("Deleted entity through the command history.");
 }
 
@@ -2790,7 +2801,9 @@ ActionResult EditorActionExecutor::reparentEntity(const Json& arguments) {
         if (!sceneProject->scene->findComponent<Transform>(entity) || !sceneProject->scene->findComponent<Transform>(parent)) {
             return failResult("Both entities need a Transform to be parented.");
         }
-        CommandHandle::get(sceneId)->addCommandNoMerge(new MoveEntityOrderCmd(project, sceneId, entity, parent, InsertionType::INTO));
+        if (!CommandHandle::get(sceneId)->addCommandNoMerge(new MoveEntityOrderCmd(project, sceneId, entity, parent, InsertionType::INTO))) {
+            return failResult(kRefusedCommand);
+        }
         return okResult("Reparented entity through the command history.");
     }
 
@@ -2807,7 +2820,9 @@ ActionResult EditorActionExecutor::reparentEntity(const Json& arguments) {
     if (rootTarget == NULL_ENTITY) {
         return failResult("Cannot move to scene root because there is no root-level target to order against.");
     }
-    CommandHandle::get(sceneId)->addCommandNoMerge(new MoveEntityOrderCmd(project, sceneId, entity, rootTarget, InsertionType::BEFORE));
+    if (!CommandHandle::get(sceneId)->addCommandNoMerge(new MoveEntityOrderCmd(project, sceneId, entity, rootTarget, InsertionType::BEFORE))) {
+        return failResult(kRefusedCommand);
+    }
     return okResult("Moved entity to scene root through the command history.");
 }
 
@@ -2826,7 +2841,9 @@ ActionResult EditorActionExecutor::moveEntityOrder(const Json& arguments) {
     else if (insertion == "child_first" || insertion == "child_last" || insertion == "into") type = InsertionType::INTO;
     else return failResult("Unsupported insertion. Use before, after, child_first, or child_last.");
 
-    CommandHandle::get(sceneId)->addCommandNoMerge(new MoveEntityOrderCmd(project, sceneId, entity, target, type));
+    if (!CommandHandle::get(sceneId)->addCommandNoMerge(new MoveEntityOrderCmd(project, sceneId, entity, target, type))) {
+        return failResult(kRefusedCommand);
+    }
     return okResult("Moved entity order through the command history.");
 }
 
@@ -3444,6 +3461,7 @@ ActionResult EditorActionExecutor::addChildScene(const Json& arguments) {
     if (!project->getScene(sceneId)->scene) return failResult(kClosedParentScene);
     if (sceneId == childSceneId) return failResult("A scene cannot be its own child.");
     if (project->wouldCreateChildSceneCycle(sceneId, childSceneId)) return failResult("The child scene already contains this scene, which would create a cycle.");
+    if (project->hasChildScene(sceneId, childSceneId)) return failResult("Child scene is already attached to this scene.");
 
     const bool startActive = arguments.value("start_active", true);
     if (startActive) {
@@ -4619,7 +4637,9 @@ ActionResult EditorActionExecutor::createBundleFromEntity(const Json& arguments)
     if (!node || !node.IsMap()) return failResult("Failed to encode entity selection.");
     fs::create_directories((project->getProjectPath() / bundleRel).parent_path());
 
-    CommandHandle::get(sceneId)->addCommandNoMerge(new CreateEntityBundleCmd(project, sceneId, bundleRel, node));
+    if (!CommandHandle::get(sceneId)->addCommandNoMerge(new CreateEntityBundleCmd(project, sceneId, bundleRel, node))) {
+        return failResult(kRefusedCommand);
+    }
     if (resourcesWindow) resourcesWindow->refreshCurrentDirectory();
     return okResult("Created bundle from entity through the command history.");
 }
@@ -4663,7 +4683,9 @@ ActionResult EditorActionExecutor::addEntityToBundle(const Json& arguments) {
     Entity bundleRoot = resolveEntityByKeys(sceneProject, arguments, "bundle_root_id", "bundle_root_name");
     if (bundleRoot == NULL_ENTITY) return failResult("Bundle root entity not found.");
 
-    CommandHandle::get(sceneId)->addCommandNoMerge(new AddEntityToBundleCmd(project, sceneId, entity, bundleRoot));
+    if (!CommandHandle::get(sceneId)->addCommandNoMerge(new AddEntityToBundleCmd(project, sceneId, entity, bundleRoot))) {
+        return failResult(kRefusedCommand);
+    }
     return okResult("Added entity to bundle through the command history.");
 }
 
@@ -4677,7 +4699,9 @@ ActionResult EditorActionExecutor::removeEntityFromBundle(const Json& arguments)
 
     Transform* transform = sceneProject->scene->findComponent<Transform>(entity);
     Entity parent = transform ? transform->parent : NULL_ENTITY;
-    CommandHandle::get(sceneId)->addCommandNoMerge(new RemoveEntityFromBundleCmd(project, sceneId, entity, parent));
+    if (!CommandHandle::get(sceneId)->addCommandNoMerge(new RemoveEntityFromBundleCmd(project, sceneId, entity, parent))) {
+        return failResult(kRefusedCommand);
+    }
     return okResult("Removed entity from bundle through the command history.");
 }
 
@@ -4690,7 +4714,9 @@ ActionResult EditorActionExecutor::makeBundleComponentUnique(const Json& argumen
     ComponentType component;
     if (!parseComponentType(arguments.value("component", ""), component)) return failResult("Unknown component type.");
 
-    CommandHandle::get(sceneId)->addCommandNoMerge(new ComponentToBundleLocalCmd(project, sceneId, entity, component));
+    if (!CommandHandle::get(sceneId)->addCommandNoMerge(new ComponentToBundleLocalCmd(project, sceneId, entity, component))) {
+        return failResult("The component is already a local override.");
+    }
     return okResult("Made bundle component unique through the command history.");
 }
 
@@ -4703,7 +4729,9 @@ ActionResult EditorActionExecutor::revertBundleComponent(const Json& arguments) 
     ComponentType component;
     if (!parseComponentType(arguments.value("component", ""), component)) return failResult("Unknown component type.");
 
-    CommandHandle::get(sceneId)->addCommandNoMerge(new ComponentToBundleSharedCmd(project, sceneId, entity, component));
+    if (!CommandHandle::get(sceneId)->addCommandNoMerge(new ComponentToBundleSharedCmd(project, sceneId, entity, component))) {
+        return failResult("The component has no local override to revert.");
+    }
     return okResult("Reverted bundle component through the command history.");
 }
 

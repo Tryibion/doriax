@@ -28,6 +28,8 @@ public:
     static std::string resultText(const ActionResult& result);
     // Logs a failure at its severity; source is who ran it, "AI" or "MCP"
     static void logFailure(const ActionResult& result, const std::string& source);
+    // Changes can't run while a save thread reads the scene
+    static bool isBlockedBySave(Project* project, const std::string& name);
 
 private:
     Project* project;
