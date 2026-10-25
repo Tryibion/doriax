@@ -719,7 +719,7 @@ bool editor::ShaderBuilder::setupShaderArgs(shadercompiler::args_t& args, Shader
         args.defines.push_back({"MAX_TERRAIN_LAYERS", std::to_string(MAX_TERRAIN_LAYERS)});
     }
     if (shaderType == ShaderType::MESH || shaderType == ShaderType::WATER){
-        args.defines.push_back({"MAX_LIGHTS", "6"});
+        args.defines.push_back({"MAX_LIGHTS", std::to_string(MAX_LIGHTS)});
         args.defines.push_back({"MAX_SHADOW_ATLAS_SLOTS", std::to_string(MAX_SHADOW_ATLAS_SLOTS)});
         args.defines.push_back({"MAX_POINT_SHADOW_ATLAS_SLOTS", std::to_string(MAX_POINT_SHADOW_ATLAS_SLOTS)});
         args.defines.push_back({"MAX_SHADOWCASCADES", std::to_string(MAX_SHADOWCASCADES)});
