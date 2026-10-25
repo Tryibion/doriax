@@ -4482,6 +4482,18 @@ void MeshSystem::createTorus(MeshComponent& mesh, float radius, float ringRadius
         mesh.needReload = true;
 }
 
+// Shader variants read a fixed number of morph slots, so the ones past the last target
+// repeat the first, which a zero weight cancels.
+static void fillMorphSlots(Submesh& submesh, AttributeType first, int slots){
+    auto firstAttribute = submesh.attributes.find(first);
+    if (firstAttribute == submesh.attributes.end()){
+        return;
+    }
+    for (int s = 1; s < slots; s++){
+        submesh.attributes.emplace(static_cast<AttributeType>(static_cast<int>(first) + s), firstAttribute->second);
+    }
+}
+
 bool MeshSystem::loadGLTF(Entity entity, const std::string filename, bool asyncLoad, bool skipEntities, bool changeRootTransform){
     const std::string poolKey = getModelFilenameKey(filename);
 
@@ -5335,6 +5347,10 @@ bool MeshSystem::loadGLTF(Entity entity, const std::string filename, bool asyncL
             }
 
             if (morphTargets) {
+                const int morphSlots = (morphNormals && morphTangents) ? 2 : (morphNormals || morphTangents) ? 4 : MAX_MORPHTARGETS;
+                fillMorphSlots(mesh.submeshes[i], AttributeType::MORPHTARGET0, morphSlots);
+                fillMorphSlots(mesh.submeshes[i], AttributeType::MORPHNORMAL0, morphSlots);
+                fillMorphSlots(mesh.submeshes[i], AttributeType::MORPHTANGENT0, 2);
                 // glTF weights default to 0
                 for (int w = 0; w < MAX_MORPHTARGETS; w++) {
                     mesh.morphWeights[w] = (w < static_cast<int>(gltfmesh.weights.size())) ? static_cast<float>(gltfmesh.weights[w]) : 0.0f;
