@@ -428,6 +428,7 @@ void editor::SceneWindow::handleResourceFileDragDrop(SceneProject* sceneProject)
     static bool draggingResourceFile = false;
     static Image* tempImage = nullptr;
     static MeshComponent* selMesh = nullptr;
+    static uint32_t selMeshSceneId = NULL_PROJECT_SCENE;
     static UIComponent* selUI = nullptr;
     static TextComponent* selText = nullptr;
     static std::vector<Material> originalMeshMaterials;
@@ -437,6 +438,13 @@ void editor::SceneWindow::handleResourceFileDragDrop(SceneProject* sceneProject)
     static Texture originalTex;
     static FontArray originalFont;
     static Entity lastSelEntity = NULL_ENTITY;
+
+    // fetched again each frame: the pointer would go stale, and the fetch tells the scene the mesh changes;
+    // by id, as the scene can close during the drag
+    if (selMesh) {
+        SceneProject* selMeshScene = project->getScene(selMeshSceneId);
+        selMesh = selMeshScene ? selMeshScene->scene->findComponent<MeshComponent>(lastSelEntity) : nullptr;
+    }
 
     if (ImGui::BeginDragDropTarget()) {
         const ImGuiPayload* peekPayload = ImGui::GetDragDropPayload();
@@ -568,6 +576,7 @@ void editor::SceneWindow::handleResourceFileDragDrop(SceneProject* sceneProject)
                                 if (MeshComponent* mesh = sceneProject->scene->findComponent<MeshComponent>(selEntity)) {
                                     if (!selMesh) {
                                         selMesh = mesh;
+                                        selMeshSceneId = sceneProject->id;
                                         originalMeshMaterials.clear();
                                         originalMeshNumSubmeshes = mesh->numSubmeshes;
                                         for (unsigned int s = 0; s < mesh->numSubmeshes; s++) {
@@ -641,6 +650,7 @@ void editor::SceneWindow::handleResourceFileDragDrop(SceneProject* sceneProject)
 
                                         if (!selMesh) {
                                             selMesh = mesh;
+                                            selMeshSceneId = sceneProject->id;
                                             originalMeshMaterials.clear();
                                             originalMeshNumSubmeshes = mesh->numSubmeshes;
                                             for (unsigned int s = 0; s < mesh->numSubmeshes; s++) {

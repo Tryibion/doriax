@@ -66,6 +66,14 @@ bool ObjectRender::sharesState(const ObjectRender& other, PipelineType pipType) 
     return backend.sharesState(other.backend, pipType);
 }
 
+bool ObjectRender::sharesPipeline(const ObjectRender& other, PipelineType pipType) const{
+    return backend.sharesPipeline(other.backend, pipType);
+}
+
+void ObjectRender::getStateKey(std::vector<uint32_t>& key) const{
+    backend.getStateKey(key);
+}
+
 bool ObjectRender::beginDraw(PipelineType pipType){
     return backend.beginDraw(pipType);
 }

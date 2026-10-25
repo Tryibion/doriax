@@ -43,6 +43,9 @@ namespace doriax {
 
         // same pipeline and bindings apart from the buffers: one draw can render both
         bool sharesState(const ObjectRender& other, PipelineType pipType) const;
+        bool sharesPipeline(const ObjectRender& other, PipelineType pipType) const;
+        // what sharesState compares, for every pipeline type
+        void getStateKey(std::vector<uint32_t>& key) const;
         bool beginDraw(PipelineType pipType);
         void applyUniformBlock(int slot, unsigned int count, void* data);
         // baseElement skips that many elements of the bound index (or vertex) range,

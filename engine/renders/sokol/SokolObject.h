@@ -13,6 +13,7 @@
 #include "sokol_gfx.h"
 
 #include <map>
+#include <vector>
 #include <memory>
 #include <tuple>
 
@@ -98,6 +99,8 @@ namespace doriax{
 
         // same pipeline and bindings apart from the buffers: one draw can render both
         bool sharesState(const SokolObject& other, PipelineType pipType) const;
+        bool sharesPipeline(const SokolObject& other, PipelineType pipType) const;
+        void getStateKey(std::vector<uint32_t>& key) const;
         bool beginDraw(PipelineType pipType);
         void applyUniformBlock(int slot, unsigned int count, void* data);
         void draw(unsigned int baseElement, unsigned int vertexCount, unsigned int instanceCount);

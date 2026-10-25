@@ -609,6 +609,27 @@ bool SokolObject::sharesState(const SokolObject& other, PipelineType pipType) co
         bind.index_buffer_offset == other.bind.index_buffer_offset;
 }
 
+bool SokolObject::sharesPipeline(const SokolObject& other, PipelineType pipType) const{
+    return getPipeline(pipType).id == other.getPipeline(pipType).id;
+}
+
+void SokolObject::getStateKey(std::vector<uint32_t>& key) const{
+    for (const sg_pipeline& pipeline : {pip, depth_pip, shadow_depth_pip, rtt_pip, rtt_invert_pip, gbuffer_pip,
+            nodepth_pip, rtt_nodepth_pip, rtt_noblend_pip, rtt_coloronly_pip, zprepass_pip, zprepass_rtt_pip}){
+        key.push_back(pipeline.id);
+    }
+    for (const sg_view& view : bind.views){
+        key.push_back(view.id);
+    }
+    for (const sg_sampler& sampler : bind.samplers){
+        key.push_back(sampler.id);
+    }
+    for (int offset : bind.vertex_buffer_offsets){
+        key.push_back((uint32_t)offset);
+    }
+    key.push_back((uint32_t)bind.index_buffer_offset);
+}
+
 bool SokolObject::beginDraw(PipelineType pipType){
     sg_pipeline selectedPipeline = getPipeline(pipType);
 

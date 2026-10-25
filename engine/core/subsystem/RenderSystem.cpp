@@ -23,6 +23,7 @@
 #include <memory>
 #include <algorithm>
 #include <array>
+#include <cfloat>
 #include <cmath>
 #include <iterator>
 #include <limits>
@@ -35,12 +36,47 @@ using namespace doriax;
 
 namespace {
     constexpr int SPOT_MASK_TILE_SIZE = 256;
+    // Settling a sprite costs about what a few frames drawn from its copy save, so one written
+    // again within SPRITE_SETTLE_HOLD updates waits before settling again, twice as long each time
+    constexpr uint32_t SPRITE_SETTLE_HOLD = 4;
+    constexpr uint32_t SPRITE_SETTLE_WAIT = 30;
+    constexpr uint32_t SPRITE_SETTLE_WAIT_MAX = 960;
+
+    // the sprite batches move vertices on the CPU with w = 1; a projective model matrix keeps its w on the GPU
+    bool hasAffineModel(const Transform& transform){
+        const float* model = transform.modelMatrix;
+        return model[3] == 0 && model[7] == 0 && model[11] == 0 && model[15] == 1;
+    }
 
     // the signature already tells which components exist, so absent ones cost no lookup
     template<typename T>
     T* findComponent(Scene* scene, Entity entity, const Signature& signature){
         return signature.test(scene->getComponentId<T>()) ? &scene->getComponent<T>(entity) : nullptr;
     }
+
+    // a box from lo to hi against the camera planes, on plain floats with the operations of
+    // isInsideCamera, which the sprite loop calls too often to build an AABB for
+    bool isInsideFrustum(const CameraComponent& camera, const float lo[3], const float hi[3]){
+        const float center[3] = {(hi[0] + lo[0]) * 0.5f, (hi[1] + lo[1]) * 0.5f, (hi[2] + lo[2]) * 0.5f};
+        const float half[3] = {(hi[0] - lo[0]) * 0.5f, (hi[1] - lo[1]) * 0.5f, (hi[2] - lo[2]) * 0.5f};
+        for (int p = 0; p < 6; p++){
+            if (p == FRUSTUM_PLANE_FAR && camera.farClip == 0)
+                continue;
+            const Vector3& n = camera.frustumPlanes[p].normal;
+            const float distance = n.x * center[0] + n.y * center[1] + n.z * center[2] + camera.frustumPlanes[p].d;
+            if (distance < -(fabsf(n.x * half[0]) + fabsf(n.y * half[1]) + fabsf(n.z * half[2])))
+                return false;
+        }
+        return true;
+    }
+
+    // the meshes the render system reads while it updates and draws are not changed by it
+    struct UntrackedScope{
+        bool& tracked;
+        bool previous;
+        explicit UntrackedScope(bool& tracked): tracked(tracked), previous(tracked){ tracked = false; }
+        ~UntrackedScope(){ tracked = previous; }
+    };
 
     // every light, not just the selected ones, so the variant does not change with the camera
     bool allLightsDirectional(Scene* scene){
@@ -384,9 +420,19 @@ RenderSystem::RenderSystem(Scene* scene): SubSystem(scene){
     occluder2DNeedUpdateBuffer = false;
     hasReflectionProbes = false;
     capturingReflectionProbe = false;
+
+    for (ComponentId id : {scene->getComponentId<CameraComponent>(), scene->getComponentId<UILayoutComponent>(),
+            scene->getComponentId<UIComponent>(), scene->getComponentId<PointsComponent>(), scene->getComponentId<LinesComponent>(),
+            scene->getComponentId<LightComponent>(), scene->getComponentId<InstancedMeshComponent>(), scene->getComponentId<TerrainComponent>(),
+            scene->getComponentId<TilemapComponent>(), scene->getComponentId<SoundComponent>(), scene->getComponentId<ModelComponent>(),
+            scene->getComponentId<BoneComponent>()}){
+        spriteLoopComponents.set(id);
+    }
+    scene->getComponentArray<MeshComponent>()->setAccessListener(&RenderSystem::onMeshAccess, this);
 }
 
 RenderSystem::~RenderSystem(){
+    scene->getComponentArray<MeshComponent>()->setAccessListener(nullptr, nullptr);
 }
 
 void RenderSystem::load(){
@@ -415,6 +461,8 @@ void RenderSystem::load(){
 void RenderSystem::destroy(){
     // View teardown keeps the scene alive; retain CPU assets for its next load.
     const bool reloadView = !Engine::isViewLoaded();
+
+    unsettleSprites();
 
     // Before the transform traversal below, which the camera entities are part of.
     while (!mirrorCameras.empty()){
@@ -4193,25 +4241,27 @@ void RenderSystem::updateTerrainNodesBuffer(TerrainComponent& terrain, int viewI
     terrain.views[viewIndex].needUpdateNodesBuffer = false;
 }
 
-// false when the mesh needs its own draw; culled sprites count as batched
-bool RenderSystem::batchSprite(Entity entity, MeshComponent& mesh, Transform& transform, CameraComponent& camera, InstancedMeshComponent* instmesh, TerrainComponent* terrain, TilemapComponent* tilemap){
-    // Ult and Vc4, optionally Uv1, Txr, Fog, Ams and Aop: nothing else in them is per object
+// Quads drawn unlit with vertex colors, optionally with Uv1, Txr, Fog, Ams and Aop: nothing else
+// in them is per object. For bigger meshes a draw with shared buffers costs less than moving the vertices
+bool RenderSystem::canBatchSprite(const MeshComponent& mesh) const{
     constexpr uint32_t required = (1u << 0) | (1u << 10);
     constexpr uint32_t allowed = required | (1u << 1) | (1u << 11) | (1u << 12) | (1u << 24) | (1u << 25);
 
-    // quads: for bigger meshes a draw with shared buffers costs less than moving the vertices.
-    // An opaque mesh in the depth prepass keeps its own transform, or its depth would not match
-    if (!mesh.loaded || mesh.needReload || instmesh || terrain || tilemap || mesh.numSubmeshes != 1 ||
-            mesh.numExternalBuffers != 0 || mesh.buffer.getCount() > 4 || !mesh.buffer.getData() ||
-            !mesh.indices.getData() || (!mesh.transparent && spriteBatch.depthPrepass))
+    const Submesh& submesh = mesh.submeshes[0];
+    return mesh.loaded && !mesh.needReload && mesh.numSubmeshes == 1 && mesh.numExternalBuffers == 0 &&
+        mesh.buffer.getCount() <= 4 && mesh.buffer.getData() && mesh.indices.getData() &&
+        (submesh.shaderProperties & required) == required && !(submesh.shaderProperties & ~allowed) &&
+        !submesh.needUpdateTexture && !submesh.lodData;
+}
+
+// false when the mesh needs its own draw; culled sprites count as batched
+bool RenderSystem::batchSprite(Entity entity, MeshComponent& mesh, Transform& transform, CameraComponent& camera, InstancedMeshComponent* instmesh, TerrainComponent* terrain, TilemapComponent* tilemap){
+    // an opaque mesh in the depth prepass keeps its own transform, or its depth would not match
+    if (instmesh || terrain || tilemap || !canBatchSprite(mesh) || (!mesh.transparent && spriteBatch.depthPrepass))
         return false;
 
     Submesh& submesh = mesh.submeshes[0];
-    const float* model = transform.modelMatrix;
-    // a projective model matrix keeps its w on the GPU
-    if ((submesh.shaderProperties & required) != required || (submesh.shaderProperties & ~allowed) ||
-            submesh.needUpdateTexture || submesh.lodData || (transform.billboard && transform.fakeBillboard) ||
-            model[3] != 0 || model[7] != 0 || model[11] != 0 || model[15] != 1)
+    if ((transform.billboard && transform.fakeBillboard) || !hasAffineModel(transform))
         return false;
 
     // an equal pipeline means the same shader, layout and blending
@@ -4227,9 +4277,9 @@ bool RenderSystem::batchSprite(Entity entity, MeshComponent& mesh, Transform& tr
             return true;
 
         MeshComponent& first = *spriteBatch.items[0].mesh;
-        const size_t batchVertices = (spriteBatch.items.size() == 1) ? first.buffer.getCount() : spriteBatch.vertices.size() / spriteBatch.stride;
+        const size_t batchVertices = (spriteBatch.items.size() == 1) ? first.buffer.getCount() : spriteBatch.vertices.size() / spriteBatch.layout.stride;
         if (!sharesState(first.submeshes[0]) || batchVertices + mesh.buffer.getCount() > std::numeric_limits<uint16_t>::max()){
-            flushSpriteBatch();
+            flushSpriteItems();
         }
     }
 
@@ -4242,7 +4292,7 @@ bool RenderSystem::batchSprite(Entity entity, MeshComponent& mesh, Transform& tr
             return false;
         if (cullsBatch(mesh, nullptr) && !isInsideCamera(camera, mesh.worldAABB))
             return true;
-        if (!startSpriteBatch(mesh))
+        if (!getSpriteLayout(mesh, spriteBatch.layout))
             return false;
     }
 
@@ -4257,18 +4307,18 @@ bool RenderSystem::batchSprite(Entity entity, MeshComponent& mesh, Transform& tr
     return true;
 }
 
-// checks what an equal pipeline does not tell, and takes the layout the batch writes from its first sprite
-bool RenderSystem::startSpriteBatch(MeshComponent& mesh){
+// checks what an equal pipeline does not tell, and finds the attributes the batch rewrites
+bool RenderSystem::getSpriteLayout(MeshComponent& mesh, SpriteLayout& layout) const{
     const Submesh& submesh = mesh.submeshes[0];
     if (submesh.customShaderId != 0 || !mesh.customShader.empty() || !scene->getDefaultMeshShader().empty() ||
             submesh.primitiveType != PrimitiveType::TRIANGLES || !submesh.attributes.empty() || submesh.vertexCount == 0 ||
             submesh.material.baseColorTexture.isFramebuffer())
         return false;
 
-    Attribute* position = mesh.buffer.getAttribute(AttributeType::POSITION);
-    Attribute* texcoord = mesh.buffer.getAttribute(AttributeType::TEXCOORD1);
-    Attribute* color = mesh.buffer.getAttribute(AttributeType::COLOR);
-    Attribute* index = mesh.indices.getAttribute(AttributeType::INDEX);
+    const Attribute* position = mesh.buffer.getAttribute(AttributeType::POSITION);
+    const Attribute* texcoord = mesh.buffer.getAttribute(AttributeType::TEXCOORD1);
+    const Attribute* color = mesh.buffer.getAttribute(AttributeType::COLOR);
+    const Attribute* index = mesh.indices.getAttribute(AttributeType::INDEX);
     if (!position || !color || !index ||
             position->getDataType() != AttributeDataType::FLOAT || position->getElements() != 3 ||
             color->getDataType() != AttributeDataType::FLOAT || color->getElements() != 4 ||
@@ -4278,56 +4328,88 @@ bool RenderSystem::startSpriteBatch(MeshComponent& mesh){
             index->getCount() < submesh.vertexCount)
         return false;
 
-    spriteBatch.stride = mesh.buffer.getStride();
-    spriteBatch.positionOffset = position->getOffset();
-    spriteBatch.colorOffset = color->getOffset();
-    spriteBatch.texcoordOffset = texcoord ? (int)texcoord->getOffset() : -1;
+    layout.stride = mesh.buffer.getStride();
+    layout.positionOffset = position->getOffset();
+    layout.colorOffset = color->getOffset();
+    layout.texcoordOffset = texcoord ? (int)texcoord->getOffset() : -1;
     return true;
+}
+
+// the texture rect and material color become vertex data, the batch draws with neutral uniforms
+void RenderSystem::bakeSpriteVertices(unsigned char* vertices, unsigned int count, const SpriteLayout& layout, const Submesh& submesh) const{
+    const Rect& rect = submesh.textureRect;
+    const Vector4& tint = submesh.material.baseColorFactor;
+
+    for (unsigned int v = 0; v < count; v++, vertices += layout.stride){
+        if (layout.texcoordOffset >= 0 && submesh.hasTextureRect){
+            float uv[2];
+            std::memcpy(uv, vertices + layout.texcoordOffset, sizeof(uv));
+            uv[0] = uv[0] * rect.getWidth() + rect.getX();
+            uv[1] = uv[1] * rect.getHeight() + rect.getY();
+            std::memcpy(vertices + layout.texcoordOffset, uv, sizeof(uv));
+        }
+
+        float color[4];
+        std::memcpy(color, vertices + layout.colorOffset, sizeof(color));
+        color[0] *= tint.x;
+        color[1] *= tint.y;
+        color[2] *= tint.z;
+        color[3] *= tint.w;
+        std::memcpy(vertices + layout.colorOffset, color, sizeof(color));
+    }
 }
 
 void RenderSystem::appendSpriteGeometry(const SpriteBatchItem& item){
     const MeshComponent& mesh = *item.mesh;
     const Submesh& submesh = mesh.submeshes[0];
     const Matrix4& model = item.transform->modelMatrix;
-    const Rect& rect = submesh.textureRect;
-    const Vector4& tint = submesh.material.baseColorFactor;
+    const SpriteLayout& layout = spriteBatch.layout;
 
-    const unsigned int stride = spriteBatch.stride;
     const unsigned int count = mesh.buffer.getCount();
     const size_t start = spriteBatch.vertices.size();
-    const uint16_t base = (uint16_t)(start / stride);
-    spriteBatch.vertices.resize(start + (size_t)count * stride);
-    unsigned char* vertex = spriteBatch.vertices.data() + start;
-    std::memcpy(vertex, mesh.buffer.getData(), (size_t)count * stride);
+    const uint16_t base = (uint16_t)(start / layout.stride);
+    spriteBatch.vertices.resize(start + (size_t)count * layout.stride);
+    unsigned char* vertices = spriteBatch.vertices.data() + start;
+    std::memcpy(vertices, mesh.buffer.getData(), (size_t)count * layout.stride);
+    bakeSpriteVertices(vertices, count, layout, submesh);
 
-    // the texture rect and material color become vertex data, the batch draws with neutral uniforms
-    for (unsigned int v = 0; v < count; v++, vertex += stride){
+    for (unsigned int v = 0; v < count; v++){
+        unsigned char* vertex = vertices + (size_t)v * layout.stride + layout.positionOffset;
         Vector3 position;
-        std::memcpy(&position, vertex + spriteBatch.positionOffset, sizeof(float) * 3);
+        std::memcpy(&position, vertex, sizeof(float) * 3);
         position = model * position;
-        std::memcpy(vertex + spriteBatch.positionOffset, &position, sizeof(float) * 3);
-
-        if (spriteBatch.texcoordOffset >= 0 && submesh.hasTextureRect){
-            float uv[2];
-            std::memcpy(uv, vertex + spriteBatch.texcoordOffset, sizeof(uv));
-            uv[0] = uv[0] * rect.getWidth() + rect.getX();
-            uv[1] = uv[1] * rect.getHeight() + rect.getY();
-            std::memcpy(vertex + spriteBatch.texcoordOffset, uv, sizeof(uv));
-        }
-
-        float color[4];
-        std::memcpy(color, vertex + spriteBatch.colorOffset, sizeof(color));
-        color[0] *= tint.x;
-        color[1] *= tint.y;
-        color[2] *= tint.z;
-        color[3] *= tint.w;
-        std::memcpy(vertex + spriteBatch.colorOffset, color, sizeof(color));
+        std::memcpy(vertex, &position, sizeof(float) * 3);
     }
 
     const uint16_t* indices = reinterpret_cast<const uint16_t*>(mesh.indices.getData());
     for (unsigned int i = 0; i < submesh.vertexCount; i++){
         spriteBatch.indices.push_back(base + indices[i]);
     }
+}
+
+// what a batch draws with: the color factor is already in the vertices
+void RenderSystem::applySpriteBatchUniforms(ObjectRender& render, Submesh& submesh){
+    if (hasFog){
+        render.applyUniformBlock(submesh.slotFSFog, sizeof(float) * 8, &fs_fog);
+    }
+
+    if (submesh.hasTextureRect){
+        Rect fullRect(0, 0, 1, 1);
+        render.applyUniformBlock(submesh.slotVSSprite, sizeof(float) * 4, &fullRect);
+    }
+
+    float materialParams[8];
+    std::memcpy(materialParams, &submesh.material, sizeof(materialParams));
+    std::fill(materialParams, materialParams + 4, 1.0f);
+    const bool alphaMask = submesh.shaderProperties & (1u << 24);
+    render.applyUniformBlock(submesh.slotFSParams, sizeof(float) * (alphaMask ? 8 : 4), materialParams);
+
+    Matrix4 matrices[3];
+    matrices[2] = spriteBatch.camera->viewProjectionMatrix;
+    if (isRenderingFlipped(*spriteBatch.camera)){
+        matrices[2] = Matrix4::scaleMatrix(Vector3(1, -1, 1)) * matrices[2];
+    }
+    render.applyUniformBlock(submesh.slotVSParams, sizeof(matrices), matrices);
 }
 
 bool RenderSystem::drawSpriteBatch(){
@@ -4349,28 +4431,7 @@ bool RenderSystem::drawSpriteBatch(){
     if (!render.beginDraw(spriteBatch.pipType))
         return false;
 
-    if (hasFog){
-        render.applyUniformBlock(submesh.slotFSFog, sizeof(float) * 8, &fs_fog);
-    }
-
-    if (submesh.hasTextureRect){
-        Rect fullRect(0, 0, 1, 1);
-        render.applyUniformBlock(submesh.slotVSSprite, sizeof(float) * 4, &fullRect);
-    }
-
-    // the color factor is already in the vertices
-    float materialParams[8];
-    std::memcpy(materialParams, &submesh.material, sizeof(materialParams));
-    std::fill(materialParams, materialParams + 4, 1.0f);
-    const bool alphaMask = submesh.shaderProperties & (1u << 24);
-    render.applyUniformBlock(submesh.slotFSParams, sizeof(float) * (alphaMask ? 8 : 4), materialParams);
-
-    Matrix4 matrices[3];
-    matrices[2] = spriteBatch.camera->viewProjectionMatrix;
-    if (isRenderingFlipped(*spriteBatch.camera)){
-        matrices[2] = Matrix4::scaleMatrix(Vector3(1, -1, 1)) * matrices[2];
-    }
-    render.applyUniformBlock(submesh.slotVSParams, sizeof(matrices), matrices);
+    applySpriteBatchUniforms(render, submesh);
 
     render.replaceVertexBuffer(mesh.buffer.getRender(), &spriteBatch.vertexBuffer, vertexOffset);
     render.setIndexBuffer(&spriteBatch.indexBuffer, indexOffset);
@@ -4381,7 +4442,7 @@ bool RenderSystem::drawSpriteBatch(){
     return true;
 }
 
-void RenderSystem::flushSpriteBatch(){
+void RenderSystem::flushSpriteItems(){
     if (spriteBatch.items.empty())
         return;
 
@@ -4397,6 +4458,285 @@ void RenderSystem::flushSpriteBatch(){
     spriteBatch.items.clear();
     spriteBatch.vertices.clear();
     spriteBatch.indices.clear();
+}
+
+// draws everything batched so far, before any other draw
+void RenderSystem::flushSpriteBatch(){
+    flushSpriteItems();
+    flushSpriteSegment();
+}
+
+void RenderSystem::onMeshAccess(void* data, Entity entity){
+    RenderSystem* system = static_cast<RenderSystem*>(data);
+    if (!system->trackMeshAccess || !system->isSpriteSettled(entity))
+        return;
+
+    // one written every few frames keeps the per-frame batch for a while instead
+    SettleWait& wait = system->settleWaits[entity];
+    if (system->spriteUpdates - system->settledSprites[system->settledIndex(entity)].settledAt < SPRITE_SETTLE_HOLD){
+        wait.length = std::min(std::max(wait.length * 2, SPRITE_SETTLE_WAIT), SPRITE_SETTLE_WAIT_MAX);
+    }else{
+        wait.length = 0;
+    }
+    wait.until = system->spriteUpdates + wait.length;
+    system->unsettleSprite(entity);
+}
+
+// A sprite the batch draws keeps a copy of its batch data until its mesh is fetched for writing
+// or one of its components is added or removed. Until then frames draw it from the copy and skip
+// the checks of a mesh that may have changed; only the copy's positions, its bounds, and its MVP
+// where a pass reads it, follow the transform. A write through a reference kept from an earlier
+// fetch is not seen: a mesh is written through a fresh fetch, as a held reference can dangle anyway.
+void RenderSystem::settleSprite(Entity entity, Signature signature, MeshComponent& mesh, const Transform& transform){
+    if (isSpriteSettled(entity) || (signature & spriteLoopComponents).any() || transform.billboard || !hasAffineModel(transform))
+        return;
+    if (!settleWaits.empty()){
+        auto wait = settleWaits.find(entity);
+        if (wait != settleWaits.end() && spriteUpdates < wait->second.until)
+            return;
+    }
+    if (!canBatchSprite(mesh))
+        return;
+
+    const Submesh& submesh = mesh.submeshes[0];
+    const unsigned int vertexCount = mesh.buffer.getCount();
+    SpriteLayout layout;
+    if (!getSpriteLayout(mesh, layout) || layout.stride * 4 > sizeof(SettledSprite::vertices) ||
+            submesh.vertexCount > sizeof(SettledSprite::indices) / sizeof(uint16_t))
+        return;
+
+    SettledSprite sprite;
+    sprite.entity = entity;
+    sprite.settledAt = spriteUpdates;
+    sprite.vertexCount = vertexCount;
+    sprite.indexCount = submesh.vertexCount;
+    sprite.culls = mesh.worldAABB != AABB::ZERO;
+    sprite.aabb = mesh.aabb;
+    std::memcpy(sprite.vertices, mesh.buffer.getData(), (size_t)vertexCount * layout.stride);
+    bakeSpriteVertices(sprite.vertices, vertexCount, layout, submesh);
+    std::memcpy(sprite.indices, mesh.indices.getData(), sizeof(uint16_t) * submesh.vertexCount);
+    for (unsigned int v = 0; v < vertexCount; v++){
+        std::memcpy(sprite.positions[v], sprite.vertices + (size_t)v * layout.stride + layout.positionOffset, sizeof(sprite.positions[v]));
+    }
+
+    // sprites with equal keys draw the same way, so a run of them is one batch
+    const bool alphaMask = submesh.shaderProperties & (1u << 24);
+    const float cutoff = alphaMask ? submesh.material.alphaCutoff : 0.0f;
+    uint32_t cutoffBits;
+    std::memcpy(&cutoffBits, &cutoff, sizeof(cutoffBits));
+    std::vector<uint32_t> key;
+    key.reserve(96); // the pipelines, views, samplers and offsets getStateKey adds
+    key.insert(key.end(), {cutoffBits, layout.stride, (uint32_t)layout.positionOffset,
+        (uint32_t)layout.colorOffset, (uint32_t)(layout.texcoordOffset + 1)});
+    submesh.render.getStateKey(key);
+
+    auto it = spriteStateOf.find(key);
+    if (it == spriteStateOf.end()){
+        uint32_t state = (uint32_t)spriteStates.size();
+        if (!freeSpriteStates.empty()){
+            state = freeSpriteStates.back();
+            freeSpriteStates.pop_back();
+        }else{
+            spriteStates.emplace_back();
+        }
+        spriteStates[state].key = key;
+        spriteStates[state].layout = layout;
+        it = spriteStateOf.emplace(std::move(key), state).first;
+    }
+    sprite.state = it->second;
+    spriteStates[sprite.state].sprites++;
+    placeSettledSprite(sprite, transform);
+
+    setSettledIndex(entity, (int)settledSprites.size());
+    settledSprites.push_back(sprite);
+}
+
+void RenderSystem::unsettleSprite(Entity entity){
+    if (!isSpriteSettled(entity))
+        return;
+
+    const int index = settledIndex(entity);
+    const uint32_t stateIndex = settledSprites[index].state;
+    SpriteState& state = spriteStates[stateIndex];
+    if (--state.sprites == 0){
+        spriteStateOf.erase(state.key);
+        state.key.clear();
+        freeSpriteStates.push_back(stateIndex);
+    }
+
+    if (index != (int)settledSprites.size() - 1){
+        settledSprites[index] = settledSprites.back();
+        setSettledIndex(settledSprites[index].entity, index);
+    }
+    settledSprites.pop_back();
+    setSettledIndex(entity, -1);
+
+    // a draw of its own needs the MVP the batch did without. A billboard that turns gets it from
+    // the update loop, which has the index updateMVP walks its children from; others ignore it
+    const Entity cameraEntity = scene->getRenderCamera();
+    CameraComponent* camera = scene->findComponent<CameraComponent>(cameraEntity);
+    Transform* cameraTransform = scene->findComponent<Transform>(cameraEntity);
+    Transform* transform = scene->findComponent<Transform>(entity);
+    if (transform && transform->billboard && !transform->fakeBillboard){
+        transform->needUpdate = true;
+    }else if (camera && cameraTransform && transform){
+        updateMVP(0, *transform, *camera, *cameraTransform);
+    }
+}
+
+void RenderSystem::unsettleSprites(){
+    while (!settledSprites.empty()){
+        unsettleSprite(settledSprites.back().entity);
+    }
+    settledPages.clear();
+    spriteStates.clear();
+    freeSpriteStates.clear();
+}
+
+void RenderSystem::setSettledIndex(Entity entity, int index){
+    const size_t page = entity >> 10;
+    if (page >= settledPages.size()){
+        settledPages.resize(page + 1);
+    }
+    std::unique_ptr<SettledPage>& slot = settledPages[page];
+    if (!slot){
+        slot = std::make_unique<SettledPage>();
+        std::fill(std::begin(slot->index), std::end(slot->index), -1);
+    }
+    int& entry = slot->index[entity & 1023];
+    if (entry < 0 && index >= 0){
+        slot->count++;
+    }else if (entry >= 0 && index < 0){
+        slot->count--;
+    }
+    entry = index;
+    if (slot->count == 0){
+        slot.reset();
+    }
+}
+
+// world positions and bounds, redone when the transform changes; a settled sprite has an
+// affine model matrix, so w is 1
+void RenderSystem::placeSettledSprite(SettledSprite& sprite, const Transform& transform){
+    const SpriteLayout& layout = spriteStates[sprite.state].layout;
+    // copied, so the vertex writes need no reload of it
+    float model[16];
+    std::memcpy(model, (const float*)transform.modelMatrix, sizeof(model));
+    float lo[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+    float hi[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+    unsigned char* vertex = sprite.vertices + layout.positionOffset;
+    for (unsigned int v = 0; v < sprite.vertexCount; v++, vertex += layout.stride){
+        const float* local = sprite.positions[v];
+        const float world[3] = {
+            local[0] * model[0] + local[1] * model[4] + local[2] * model[8] + model[12],
+            local[0] * model[1] + local[1] * model[5] + local[2] * model[9] + model[13],
+            local[0] * model[2] + local[1] * model[6] + local[2] * model[10] + model[14]};
+        std::memcpy(vertex, world, sizeof(world));
+        for (int a = 0; a < 3; a++){
+            lo[a] = std::min(lo[a], world[a]);
+            hi[a] = std::max(hi[a], world[a]);
+        }
+    }
+    std::memcpy(sprite.lo, lo, sizeof(lo));
+    std::memcpy(sprite.hi, hi, sizeof(hi));
+    sprite.cullFrustum = 0;
+}
+
+// copies the sprite into the segment drawn at the next flush
+void RenderSystem::drawSettledSprite(SettledSprite& sprite, size_t index){
+    // sprites batched from their meshes come first, and the next one starts its own run
+    flushSpriteItems();
+    spriteBatch.previous = nullptr;
+
+    if (sprite.culls){
+        if (sprite.cullFrustum != spriteBatch.frustum){
+            sprite.inside = isInsideFrustum(*spriteBatch.camera, sprite.lo, sprite.hi);
+            sprite.cullFrustum = spriteBatch.frustum;
+        }
+        if (!sprite.inside)
+            return;
+    }
+
+    // a run draws one state from at most 65536 vertices
+    const SpriteLayout& layout = spriteStates[sprite.state].layout;
+    const size_t start = spriteSegment.vertices.size();
+    if (spriteSegment.runs.empty() || spriteSegment.runs.back().state != sprite.state ||
+            (start - spriteSegment.runs.back().vertexStart) / layout.stride + sprite.vertexCount > 65536){
+        spriteSegment.runs.push_back({sprite.entity, sprite.state, start, spriteSegment.indices.size(), 0});
+    }
+    SpriteRun& run = spriteSegment.runs.back();
+    spriteSegment.vertices.insert(spriteSegment.vertices.end(), sprite.vertices, sprite.vertices + (size_t)sprite.vertexCount * layout.stride);
+
+    const uint16_t base = (uint16_t)((start - run.vertexStart) / layout.stride);
+    const size_t first = spriteSegment.indices.size();
+    spriteSegment.indices.insert(spriteSegment.indices.end(), sprite.indices, sprite.indices + sprite.indexCount);
+    for (size_t i = first; i < spriteSegment.indices.size(); i++){
+        spriteSegment.indices[i] += base;
+    }
+    run.indexCount += sprite.indexCount;
+    spriteSegment.sprites.push_back({index, sprite.entity});
+}
+
+// One upload for the settled sprites drawn since the last other draw. A run that keeps the
+// pipeline of the one before only rebinds, so a texture change costs a draw and nothing more.
+void RenderSystem::flushSpriteSegment(){
+    if (spriteSegment.runs.empty())
+        return;
+
+    const size_t vertexBytes = spriteSegment.vertices.size();
+    const size_t indexBytes = spriteSegment.indices.size() * sizeof(uint16_t);
+    spriteBatch.vertexDemand += vertexBytes;
+    spriteBatch.indexDemand += indexBytes;
+
+    int vertexOffset = -1;
+    int indexOffset = -1;
+    if (spriteBatch.vertexBuffer.isCreated() && spriteBatch.indexBuffer.isCreated()){
+        vertexOffset = spriteBatch.vertexBuffer.appendBuffer(vertexBytes, spriteSegment.vertices.data());
+        indexOffset = spriteBatch.indexBuffer.appendBuffer(indexBytes, spriteSegment.indices.data());
+    }
+
+    if (vertexOffset < 0 || indexOffset < 0){
+        // the buffers grow for the next frame, until then the sprites draw from their meshes
+        auto transforms = scene->getComponentArray<Transform>();
+        const bool active = spriteBatch.active;
+        spriteBatch.active = false;
+        for (const auto& [index, entity] : spriteSegment.sprites){
+            Transform& transform = transforms->getComponentFromIndex(index);
+            updateMVP(index, transform, *spriteBatch.camera, *spriteBatch.cameraTransform);
+            drawMesh(entity, scene->getComponent<MeshComponent>(entity), transform, *spriteBatch.camera, *spriteBatch.cameraTransform, spriteBatch.pipType, nullptr, nullptr, nullptr);
+        }
+        spriteBatch.active = active;
+    }else{
+        const ObjectRender* previous = nullptr;
+        uint32_t previousCutoff = 0;
+        for (const SpriteRun& run : spriteSegment.runs){
+            MeshComponent& mesh = scene->getComponent<MeshComponent>(run.entity);
+            Submesh& submesh = mesh.submeshes[0];
+            ObjectRender& render = submesh.render;
+            const uint32_t cutoff = spriteStates[run.state].key[0];
+
+            // uniforms stay applied while the pipeline does
+            if (!previous || !render.sharesPipeline(*previous, spriteBatch.pipType) || cutoff != previousCutoff){
+                previous = nullptr;
+                if (!render.beginDraw(spriteBatch.pipType))
+                    continue;
+                applySpriteBatchUniforms(render, submesh);
+            }
+            previous = &render;
+            previousCutoff = cutoff;
+
+            render.replaceVertexBuffer(mesh.buffer.getRender(), &spriteBatch.vertexBuffer, vertexOffset + run.vertexStart);
+            render.setIndexBuffer(&spriteBatch.indexBuffer, indexOffset + run.indexStart * sizeof(uint16_t));
+            render.draw(0, run.indexCount, 1);
+            render.replaceVertexBuffer(mesh.buffer.getRender(), mesh.buffer.getRender());
+            render.resetIndexBuffer();
+        }
+    }
+
+    spriteSegment.vertices.clear();
+    spriteSegment.indices.clear();
+    spriteSegment.runs.clear();
+    spriteSegment.sprites.clear();
 }
 
 // sized from the last frame before any batch of this one uses the buffers
@@ -4419,6 +4759,7 @@ void RenderSystem::prepareSpriteBatchBuffers(){
 
 bool RenderSystem::drawMesh(Entity entity, MeshComponent& mesh, Transform& transform, CameraComponent& camera, Transform& camTransform, PipelineType pipType, InstancedMeshComponent* instmesh, TerrainComponent* terrain, TilemapComponent* tilemap, int terrainView, int instanceView, const LodView* lodView){
     if (spriteBatch.active){
+        flushSpriteSegment();
         if (batchSprite(entity, mesh, transform, camera, instmesh, terrain, tilemap))
             return true;
         flushSpriteBatch();
@@ -5718,6 +6059,7 @@ void RenderSystem::presentFramebufferToSwapchain(Framebuffer* source){
 }
 
 void RenderSystem::destroyMesh(Entity entity, MeshComponent& mesh, bool clearAssets){
+    unsettleSprite(entity);
     InstancedMeshComponent* instmesh = scene->findComponent<InstancedMeshComponent>(entity);
     TerrainComponent* terrain = scene->findComponent<TerrainComponent>(entity);
     const bool preserveAssets = mesh.needReload && !clearAssets;
@@ -8222,6 +8564,7 @@ void RenderSystem::needReloadLines() {
 }
 
 void RenderSystem::needReloadMeshes() {
+    unsettleSprites();
     auto meshes = scene->getComponentArray<MeshComponent>();
     for (int i = 0; i < meshes->size(); i++) {
         MeshComponent& mesh = meshes->getComponentFromIndex(i);
@@ -8271,13 +8614,13 @@ void RenderSystem::getLoadCount(size_t& loaded, size_t& total) const{
             loaded++;
     };
 
-    // Check MeshComponents
-    auto meshes = scene->getComponentArray<MeshComponent>();
-    for (int i = 0; i < meshes->size(); i++) {
-        const MeshComponent& mesh = meshes->getComponentFromIndex(i);
+    // Check MeshComponents, reading them without unsettling a sprite
+    const auto& meshes = *scene->getComponentArray<MeshComponent>();
+    for (int i = 0; i < meshes.size(); i++) {
+        const MeshComponent& mesh = meshes.getComponentFromIndex(i);
         // An empty tilemap never loads: loadMesh() has no buffers to create until a tile is added.
         if (!mesh.loaded) {
-            const TilemapComponent* tilemap = scene->findComponent<TilemapComponent>(meshes->getEntity(i));
+            const TilemapComponent* tilemap = scene->findComponent<TilemapComponent>(meshes.getEntity(i));
             if (tilemap && tilemap->numTiles == 0)
                 continue;
         }
@@ -9149,6 +9492,9 @@ void RenderSystem::update(double dt){
         return;
     }
 
+    const UntrackedScope untracked(trackMeshAccess);
+    spriteUpdates++;
+
     checkLightsAndShadow();
 
     // light types can change without adding or removing a light
@@ -9411,10 +9757,42 @@ void RenderSystem::update(double dt){
 
     updateWaterExclusions();
 
+    // without depth, shadows or water every pass draws settled sprites from their copies,
+    // which need no MVP; other cameras and probes update it for their own passes
+    const bool settledWithoutMVP = !mainCamera.depthTest && !hasShadows && waters->size() == 0;
+    // once that changes, the MVP they went without is updated before a pass reads it
+    const bool settledMVPStale = settledSkippedMVP && !settledWithoutMVP;
+    settledSkippedMVP = settledWithoutMVP;
+    auto meshes = scene->getComponentArray<MeshComponent>();
+
     for (int i = 0; i < transforms->size(); i++){
         Transform& transform = transforms->getComponentFromIndex(i);
 
         Entity entity = transforms->getEntity(i);
+
+        // a settled sprite only follows its transform, so one made a billboard or given a projective
+        // matrix is drawn from its mesh again
+        if ((transform.billboard || (transform.needUpdate && !hasAffineModel(transform))) && isSpriteSettled(entity)){
+            unsettleSprite(entity);
+        }
+        if (isSpriteSettled(entity)){
+            if (!settledWithoutMVP && !hasMultipleCameras && (settledMVPStale || mainCamera.needUpdate || transform.needUpdate)){
+                updateMVP(i, transform, mainCamera, mainCameraTransform);
+            }
+            if (transform.needUpdate){
+                SettledSprite& sprite = settledSprites[settledIndex(entity)];
+                placeSettledSprite(sprite, transform);
+                // meshes seldom move in their array, so the last index is tried before a lookup
+                if (sprite.meshIndex >= meshes->size() || meshes->getEntity(sprite.meshIndex) != entity){
+                    sprite.meshIndex = meshes->getIndex(entity);
+                }
+                meshes->getComponentFromIndex(sprite.meshIndex).worldAABB = transform.modelMatrix * sprite.aabb;
+            }
+            transform.needUpdateChildVisibility = false;
+            transform.needUpdate = false;
+            continue;
+        }
+
         Signature signature = scene->getSignature(entity);
 
         if (signature.test(scene->getComponentId<MeshComponent>())){
@@ -9621,6 +9999,8 @@ void RenderSystem::update(double dt){
                     }
                 }
             }
+
+            settleSprite(entity, signature, mesh, transform);
         }else if (signature.test(scene->getComponentId<UIComponent>())){
             UIComponent& ui = scene->getComponent<UIComponent>(entity);
 
@@ -9817,6 +10197,8 @@ void RenderSystem::update(double dt){
 }
 
 void RenderSystem::draw(){
+    const UntrackedScope untracked(trackMeshAccess);
+
     prepareSpriteBatchBuffers();
     std::priority_queue<TransparentRenderData, std::vector<TransparentRenderData>, TransparentRenderComparison> transparentRenders;
     // drawn before the water, which covers them
@@ -10440,6 +10822,13 @@ void RenderSystem::draw(){
         spriteBatch.pipType = colorPip;
         spriteBatch.camera = &camera;
         spriteBatch.cameraTransform = &cameraTransform;
+        // settled sprites keep their culling while the passes have the same planes
+        if (spriteBatch.frustum == 0 || camera.farClip != spriteBatch.farClip ||
+                std::memcmp(camera.frustumPlanes, spriteBatch.frustumPlanes, sizeof(spriteBatch.frustumPlanes)) != 0){
+            std::copy(camera.frustumPlanes, camera.frustumPlanes + 6, spriteBatch.frustumPlanes);
+            spriteBatch.farClip = camera.farClip;
+            spriteBatch.frustum++;
+        }
 
         if (distanceSort){
             for (const OpaqueRenderData& opaque : opaqueRenders){
@@ -10447,9 +10836,20 @@ void RenderSystem::draw(){
             }
         }
 
+        // in transform order, the order the batch keeps
+        const bool drawSettled = !distanceSort && !depthPrepass && passWaters.empty();
+
         for (int i = 0; i < transforms->size(); i++){
             Transform& transform = transforms->getComponentFromIndex(i);
             Entity entity = transforms->getEntity(i);
+
+            if (drawSettled && isSpriteSettled(entity)){
+                if (transform.visible){
+                    drawSettledSprite(settledSprites[settledIndex(entity)], i);
+                }
+                continue;
+            }
+
             Signature signature = scene->getSignature(entity);
 
             if (signature.test(scene->getComponentId<CameraComponent>())){
@@ -10757,6 +11157,7 @@ void RenderSystem::draw(){
 }
 
 void RenderSystem::onComponentAdded(Entity entity, ComponentId componentId) {
+    unsettleSprite(entity);
     if (componentId == scene->getComponentId<LightComponent>()) {
         needReloadMeshes();
     } else if (componentId == scene->getComponentId<Light2DComponent>()) {
@@ -10779,6 +11180,7 @@ void RenderSystem::onComponentAdded(Entity entity, ComponentId componentId) {
 }
 
 void RenderSystem::onComponentRemoved(Entity entity, ComponentId componentId) {
+    unsettleSprite(entity);
     if (componentId == scene->getComponentId<LightComponent>()) {
         LightComponent& light = scene->getComponent<LightComponent>(entity);
         destroyLight(light);
@@ -10788,6 +11190,7 @@ void RenderSystem::onComponentRemoved(Entity entity, ComponentId componentId) {
     } else if (componentId == scene->getComponentId<MeshComponent>()) {
         MeshComponent& mesh = scene->getComponent<MeshComponent>(entity);
         destroyMesh(entity, mesh);
+        settleWaits.erase(entity);
     } else if (componentId == scene->getComponentId<UIComponent>()) {
         UIComponent& ui = scene->getComponent<UIComponent>(entity);
         destroyUI(entity, ui);

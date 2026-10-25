@@ -6490,7 +6490,12 @@ void MeshSystem::update(double dt){
     }
 
     auto meshes = scene->getComponentArray<MeshComponent>();
+    const RenderSystem* render = scene->getSystem<RenderSystem>().get();
     for (int i = 0; i < meshes->size(); i++){
+        // nothing touched a settled sprite since it passed these checks
+        if (render->isSpriteSettled(meshes->getEntity(i)))
+            continue;
+
         MeshComponent& mesh = meshes->getComponentFromIndex(i);
 
         if (mesh.aabb == AABB::ZERO){

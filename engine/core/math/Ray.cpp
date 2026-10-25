@@ -487,15 +487,16 @@ RayReturn Ray::intersects(Scene* scene, RayFilter raytest, bool onlyStatic, uint
 RayReturn Ray::intersects(Scene* scene, RayFilter raytest, bool onlyStatic, uint16_t categoryBits, uint16_t maskBits, const std::vector<Entity>* ignoreEntities) const{
     if (raytest == RayFilter::BOUNDS){
         RayReturn closest = NO_HIT;
-        auto meshes = scene->getComponentArray<MeshComponent>();
+        // a read, which the render system must not take for a change to the meshes
+        const auto& meshes = *scene->getComponentArray<MeshComponent>();
 
-        for (size_t i = 0; i < meshes->size(); i++){
-            Entity entity = meshes->getEntity(i);
+        for (size_t i = 0; i < meshes.size(); i++){
+            Entity entity = meshes.getEntity(i);
             if (ignoreEntities && std::find(ignoreEntities->begin(), ignoreEntities->end(), entity) != ignoreEntities->end()){
                 continue;
             }
 
-            RayReturn hit = intersects(meshes->getComponentFromIndex(i).worldAABB);
+            RayReturn hit = intersects(meshes.getComponentFromIndex(i).worldAABB);
             if (hit && (!closest || hit.distance < closest.distance)){
                 hit.body = entity;
                 closest = hit;
