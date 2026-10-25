@@ -846,17 +846,6 @@ void editor::ResourcesWindow::renderFileListing(bool showDirectories){
     bool clickedInFile = false;
     hoveredFile.clear();
 
-    // --- Start marquee selection on empty click -----------------------------
-    if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0) && !ImGui::IsAnyItemHovered()){
-        isDragging = true;
-        dragStart = ImGui::GetMousePos();
-        dragStart.x -= scrollRegionMin.x;
-        dragStart.y -= scrollRegionMin.y;
-        dragStart.x += ImGui::GetScrollX();
-        dragStart.y += ImGui::GetScrollY();
-        selectedFiles.clear();
-    }
-
     // --- Update marquee rectangle and auto-scroll ---------------------------
     if (isDragging){
         ImVec2 mousePos = ImGui::GetMousePos();
@@ -1379,6 +1368,18 @@ void editor::ResourcesWindow::renderFileListing(bool showDirectories){
     // --- Clear selection when clicking empty space -------------------------
     if (ImGui::IsMouseClicked(0) && ImGui::IsWindowHovered() && !clickedInFile){
         selectedFiles.clear();
+    }
+
+    // --- Start marquee selection on empty click -----------------------------
+    // After the items, so a press that comes with the pointer move still sees the file under it
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(0) && !ImGui::IsAnyItemHovered()){
+        isDragging = true;
+        dragStart = ImGui::GetMousePos();
+        dragStart.x -= scrollRegionMin.x;
+        dragStart.y -= scrollRegionMin.y;
+        dragStart.x += ImGui::GetScrollX();
+        dragStart.y += ImGui::GetScrollY();
+        dragEnd = dragStart;
     }
 
     // --- Draw marquee rectangle --------------------------------------------
