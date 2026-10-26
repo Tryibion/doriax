@@ -1054,17 +1054,12 @@ void editor::Generator::writeSourceFiles(const fs::path& projectPath, const fs::
     // Jolt's object layer size changes its class layouts, so it has to match the engine.
     cmakeContent += "add_compile_definitions(DORIAX_PHYSICS_2D DORIAX_PHYSICS_3D JPH_OBJECT_LAYER_BITS=" + std::to_string(JPH_OBJECT_LAYER_BITS) + ")\n\n";
 
+    cmakeContent += "# libdoriax is the editor's shared engine build: match its linkage and data layouts\n";
+    cmakeContent += "add_compile_definitions(DORIAX_SHARED DORIAX_EDITOR JPH_SHARED_LIBRARY)\n\n";
+
     cmakeContent += getEditorPluginAbiCheck();
     cmakeContent += "if(DORIAX_EDITOR_PLUGIN)\n";
     cmakeContent += "    add_compile_definitions(DORIAX_EDITOR_PLUGIN)\n";
-    cmakeContent += "    # The editor links its own engine build, which is compiled as a shared\n";
-    cmakeContent += "    # library with editor-specific data layouts. The plugin must match both:\n";
-    cmakeContent += "    #  - DORIAX_SHARED makes DORIAX_API resolve to __declspec(dllimport) so\n";
-    cmakeContent += "    #    static members such as Engine::onUpdate link against the import lib on MSVC.\n";
-    cmakeContent += "    #  - DORIAX_EDITOR keeps HybridArray (and other editor-only layouts)\n";
-    cmakeContent += "    #    ABI-compatible across the DLL boundary.\n";
-    cmakeContent += "    #  - JPH_SHARED_LIBRARY does the same as DORIAX_SHARED for Jolt.\n";
-    cmakeContent += "    add_compile_definitions(DORIAX_SHARED DORIAX_EDITOR JPH_SHARED_LIBRARY)\n";
     cmakeContent += "endif()\n\n";
 
     // Match the engine DLL shipped beside this editor, which DORIAX_LIB_DIR defaults
@@ -1148,10 +1143,6 @@ void editor::Generator::writeSourceFiles(const fs::path& projectPath, const fs::
     cmakeContent += "include(${INTERNAL_DIR}/LocalPaths.cmake OPTIONAL)\n";
     cmakeContent += "if(NOT DEFINED DORIAX_LIB_DIR OR DORIAX_LIB_DIR STREQUAL \"\")\n";
     cmakeContent += "    set(DORIAX_LIB_DIR \"${DORIAX_DEFAULT_LIB_DIR}\")\n";
-    cmakeContent += "    # Default target is the editor's own engine build (shared, editor layouts).\n";
-    cmakeContent += "    # Match its macros so symbols link (DORIAX_SHARED, JPH_SHARED_LIBRARY -> dllimport on MSVC)\n";
-    cmakeContent += "    # and data layouts stay ABI-compatible (DORIAX_EDITOR), avoiding ODR/ABI mismatch.\n";
-    cmakeContent += "    add_compile_definitions(DORIAX_SHARED DORIAX_EDITOR JPH_SHARED_LIBRARY)\n";
     cmakeContent += "endif()\n\n";
 
     cmakeContent += "# Find doriax library in specified location. find_library() caches its\n";
