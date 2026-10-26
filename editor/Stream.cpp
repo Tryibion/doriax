@@ -3617,6 +3617,11 @@ std::vector<Entity> editor::Stream::decodeEntity(const YAML::Node& entityNode, E
 
             for (ComponentType cpType : Catalog::findComponents(registry, entity)){
                 if (savedComponents && savedComponents[Catalog::getComponentName(cpType, true)]) continue;
+                if (cpType == ComponentType::SkinComponent){
+                    // skins of model and generated meshes are not encoded
+                    Signature signature = registry->getSignature(entity);
+                    if (isModelBackedMesh(entity, registry, signature) || isGeneratedMesh(registry, signature)) continue;
+                }
                 ProjectUtils::removeEntityComponent(registry, entity, cpType, sceneEntities);
             }
         }
