@@ -742,8 +742,14 @@ const std::vector<ToolDefinition>& cachedTools() {
             false
         },
         {
+            "check_cpp_build_tools",
+            "Check whether this machine has what C++ scripts need to build: CMake and a C++ compiler this editor can load, from the choice in Editor Settings > Desktop. It only finds the tools; the first play after writing a C++ script proves they compile.",
+            objectSchema({}),
+            true
+        },
+        {
             "create_script",
-            "Create a Lua or C++ script file from a minimal template, attach it to an entity, and update ScriptComponent. Lua scripts are returned tables with init(), self.scene, and self.entity. C++ scripts use flat headers (\"Mesh.h\", \"ScriptBase.h\"); for mesh/cube behavior prefer cpp_subclass extending Mesh and unregister engine events in destructors.",
+            "Create a Lua or C++ script file from a minimal template, attach it to an entity, and update ScriptComponent. Keep the language a project's scripts already use; in one with none yet, prefer C++ once check_cpp_build_tools finds the tools. Lua scripts are returned tables with init(), self.scene, and self.entity. C++ scripts use flat headers (\"Mesh.h\", \"ScriptBase.h\"); for mesh/cube behavior prefer cpp_subclass extending Mesh and unregister engine events in destructors.",
             objectSchema({
                 {"scene_id", integerSchema("Scene id. Omit to use the selected scene")},
                 {"entity_id", integerSchema("Entity id")},
@@ -1491,6 +1497,7 @@ std::string EditorActionRegistry::guidance() {
         << "A bundle is only built and registered when a scene instantiates it or when it is listed as standalone, so a bundle that exists only to be spawned from a script with BundleManager needs set_standalone_bundle before createBundle can find it by name. Every createBundle call creates its own instance root and returns it, so the same bundle can be spawned repeatedly; the optional third argument is only the entity the new root is parented to (a name resolved in that scene, an entity id of that scene, or an object carrying its own scene), never the root itself. destroyBundle(scene, root) removes what that spawn created and anything parented under it since, bundles spawned there included, and leaves the parent alone.\n"
         << "When you create a script for requested behavior, write the complete script with update_script_file instead of asking the user to edit it manually.\n"
         << "A ScriptComponent holds a list of script entries; inspect_component on ScriptComponent lists them with index, class name, and file paths. attach_script adds an entry, so use it only for a script the entity does not have yet: to rename or repoint an entry it already has use update_script_entry, and to detach one use remove_script_entry. rename_resource already repoints the attached entries at the renamed file, so after renaming a script only its class name is left to fix with update_script_entry.\n"
+        << "Choose a project's script language once. If it already has scripts (search_resources with type script, or ScriptComponents in its scenes), keep their language. In a project with none yet, prefer C++ (cpp_script_class or cpp_subclass) unless the user asks for Lua, but first make sure this machine can build it: call check_cpp_build_tools, and after writing the first C++ script start the scene with control_play_mode and read_output_log. If the tools are missing, or the build fails for reasons outside your code (CMake cannot configure, the compiler or linker does not run, the editor's compatibility check fails), switch to Lua at once. If it fails on your code, fix it, but when it still does not compile after two fixes, switch to Lua as well, even though check_cpp_build_tools found the tools. To switch, detach the C++ scripts with remove_script_entry, delete their files with delete_resource, write the Lua versions, and tell the user why so they can switch back later.\n"
         << "A project can declare C++ script directories: get_project_summary reports them as script_dirs and set_project_script_dirs changes them. Each root is an include directory and every source under it is compiled without any ScriptComponent referencing it, so shared helper, utility, and library classes belong there. Create one with create_source_file, which writes a source or header without attaching it to an entity; create_script is only for a script an entity actually runs. A .cpp that is neither under a root nor included by an attached script is not compiled at all, so add the root instead of assuming it builds. The editor also only runs a C++ build when an enabled C++ script is attached to an entity somewhere in the project: Lua scripts never trigger one, so in a Lua-only project the helper sources are compiled first by an export, and a clean startup log is no proof they built.\n"
         << "An export ships what is inside the project's assets and Lua directories (get_project_summary reports assets_dir and lua_dir). A new project keeps both at the project root (.), where the export also picks up the scenes, project.yaml, notes and source art, and every .json or .txt file for the Lua side. So when a project still has either at the root, give it its own folder with set_project_asset_dirs, such as assets and scripts, before adding files: asset paths are then relative to assets and require() names to scripts. Leave directories the user already chose alone. If the project already has content at the root, ask the user first, since files move: only the files the project references move and get rewritten, so check scripts for asset paths and require() names written against the old root, and move those files too (copy_resource, then delete_resource).\n"
         << "The project C++ language standard is get_project_summary's cxx_standard (" << cxxStandardList() << ") and set_project_cxx_standard changes it. The next play or export builds with it, and an export compiles the engine with it too. Do not edit CMAKE_CXX_STANDARD in the generated CMakeLists.txt.\n"
@@ -2204,6 +2211,9 @@ std::string EditorActionRegistry::describe(const std::string& name, const Json& 
     }
     if (name == "set_project_asset_dirs") {
         return "Set project asset directories";
+    }
+    if (name == "check_cpp_build_tools") {
+        return "Check C++ build tools";
     }
     if (name == "set_project_cxx_standard") {
         if (arguments.contains("cxx_standard") && arguments["cxx_standard"].is_number_integer()) {

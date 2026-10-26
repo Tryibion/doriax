@@ -6,6 +6,7 @@
 #include "AiPathUtils.h"
 #include "AiEngineApiContext.h"
 #include "AiTerrainCapability.h"
+#include "AppSettings.h"
 #include "EditorActionRegistry.h"
 #include "EditorHost.h"
 #include "HttpClient.h"
@@ -2404,6 +2405,7 @@ ActionResult EditorActionExecutor::dispatch(const std::string& name,
     if (name == "create_source_file") return createSourceFile(arguments);
     if (name == "set_project_script_dirs") return setProjectScriptDirs(arguments);
     if (name == "set_project_asset_dirs") return setProjectAssetDirs(arguments);
+    if (name == "check_cpp_build_tools") return checkCppBuildTools();
     if (name == "set_project_cxx_standard") return setProjectCxxStandard(arguments);
     if (name == "update_project_build_file") return updateProjectBuildFile(arguments);
     if (name == "create_bundle_from_entity") return createBundleFromEntity(arguments);
@@ -4614,6 +4616,26 @@ ActionResult EditorActionExecutor::setProjectAssetDirs(const Json& arguments) {
                     "read_output_log lists each move. Files nothing references stayed where they were.",
                     Json{{"assets_dir", FileUtils::pathToGenericUtf8(project->getAssetsDir())},
                          {"lua_dir", FileUtils::pathToGenericUtf8(project->getLuaDir())}});
+}
+
+ActionResult EditorActionExecutor::checkCppBuildTools() {
+    // The same check play runs before building C++ scripts
+    const LocalBuildSettings settings = AppSettings::getBuildSettings(project->getProjectPath() / "project.yaml");
+    const bool useDefaultKit = settings.cCompiler.empty() && settings.cxxCompiler.empty() && settings.generator.empty();
+    CMakeKit kit;
+    kit.cCompiler = settings.cCompiler;
+    kit.cxxCompiler = settings.cxxCompiler;
+    kit.generator = settings.generator;
+    const std::string missing = Generator::checkBuildTools(useDefaultKit, &kit);
+    if (!missing.empty()) {
+        return okResult("C++ scripts cannot build on this machine, so use Lua unless the user installs what is missing.",
+                        Json{{"ready", false}, {"missing", missing}});
+    }
+
+    const auto shown = [](const std::string& value) { return value.empty() ? std::string("default") : value; };
+    return okResult("C++ build tools found. The first play after writing a C++ script shows whether they compile; if it keeps failing, use Lua.",
+                    Json{{"ready", true}, {"c_compiler", shown(kit.cCompiler)}, {"cxx_compiler", shown(kit.cxxCompiler)},
+                         {"generator", shown(kit.generator)}});
 }
 
 ActionResult EditorActionExecutor::setProjectCxxStandard(const Json& arguments) {
