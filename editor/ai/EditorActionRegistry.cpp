@@ -830,6 +830,15 @@ const std::vector<ToolDefinition>& cachedTools() {
             false
         },
         {
+            "set_project_asset_dirs",
+            "Change the project's assets and Lua directories (Project Settings > Directories); a field left out keeps its value. Asset paths in scenes are relative to the assets directory and require() names to the Lua directory, and an export ships what is inside them. The editor moves every file the project references into the new directory, keeping its layout, and rewrites the references in all scenes, bundles and materials, saving them. Files nothing references, such as ones scripts load by path or Lua modules loaded with require, stay where they are. Read the current values from get_project_summary (assets_dir, lua_dir).",
+            objectSchema({
+                {"assets_dir", stringSchema("Project-relative assets directory, e.g. assets, or . for the project root. Created when missing")},
+                {"lua_dir", stringSchema("Project-relative Lua directory, e.g. scripts, or . for the project root. Created when missing")}
+            }),
+            false
+        },
+        {
             "set_project_cxx_standard",
             "Set the project's C++ language standard (" + cxxStandardList() + "). The next play or export builds with it, and an export compiles the engine with it too. Read the current value from get_project_summary (cxx_standard). Do not edit CMAKE_CXX_STANDARD in the generated CMakeLists.txt.",
             objectSchema({
@@ -1155,7 +1164,7 @@ const std::vector<ToolDefinition>& cachedTools() {
         },
         {
             "create_project",
-            "Create a new project in an empty or new directory and open it in place of the current one, which must have no unsaved changes. It starts with an unsaved 3D scene named New Scene. Later calls wait until it has loaded.",
+            "Create a new project in an empty or new directory and open it in place of the current one, which must have no unsaved changes. It starts with an unsaved 3D scene named New Scene, and with its assets and Lua directories at the project root: give them their own folders with set_project_asset_dirs before adding files, so exports ship only the game's files. Later calls wait until it has loaded.",
             objectSchema({
                 {"path", stringSchema("Absolute directory for the project; it must be empty or not exist yet")},
                 {"name", stringSchema("Project name. Defaults to the directory name")}
@@ -1483,6 +1492,7 @@ std::string EditorActionRegistry::guidance() {
         << "When you create a script for requested behavior, write the complete script with update_script_file instead of asking the user to edit it manually.\n"
         << "A ScriptComponent holds a list of script entries; inspect_component on ScriptComponent lists them with index, class name, and file paths. attach_script adds an entry, so use it only for a script the entity does not have yet: to rename or repoint an entry it already has use update_script_entry, and to detach one use remove_script_entry. rename_resource already repoints the attached entries at the renamed file, so after renaming a script only its class name is left to fix with update_script_entry.\n"
         << "A project can declare C++ script directories: get_project_summary reports them as script_dirs and set_project_script_dirs changes them. Each root is an include directory and every source under it is compiled without any ScriptComponent referencing it, so shared helper, utility, and library classes belong there. Create one with create_source_file, which writes a source or header without attaching it to an entity; create_script is only for a script an entity actually runs. A .cpp that is neither under a root nor included by an attached script is not compiled at all, so add the root instead of assuming it builds. The editor also only runs a C++ build when an enabled C++ script is attached to an entity somewhere in the project: Lua scripts never trigger one, so in a Lua-only project the helper sources are compiled first by an export, and a clean startup log is no proof they built.\n"
+        << "An export ships what is inside the project's assets and Lua directories (get_project_summary reports assets_dir and lua_dir). A new project keeps both at the project root (.), where the export also picks up the scenes, project.yaml, notes and source art, and every .json or .txt file for the Lua side. So when a project still has either at the root, give it its own folder with set_project_asset_dirs, such as assets and scripts, before adding files: asset paths are then relative to assets and require() names to scripts. Leave directories the user already chose alone. If the project already has content at the root, ask the user first, since files move: only the files the project references move and get rewritten, so check scripts for asset paths and require() names written against the old root, and move those files too (copy_resource, then delete_resource).\n"
         << "The project C++ language standard is get_project_summary's cxx_standard (" << cxxStandardList() << ") and set_project_cxx_standard changes it. The next play or export builds with it, and an export compiles the engine with it too. Do not edit CMAKE_CXX_STANDARD in the generated CMakeLists.txt.\n"
         << "The project CMakeLists.txt is generated on every build and any edit to it is lost, so never edit it or ask the user to. Custom build settings -- extra include directories, linked libraries, compile definitions -- go in ProjectBuild.cmake at the project root: read the current one with read_resource_file and rewrite it whole with update_project_build_file. Attach settings to ${DORIAX_TARGET} rather than a literal target name (it differs between the editor and exported builds) and use ${DORIAX_SCRIPTS_DIR} as the root of script paths, e.g. target_include_directories(${DORIAX_TARGET} PRIVATE ${DORIAX_SCRIPTS_DIR}/Source/Public) and target_link_libraries(${DORIAX_TARGET} PRIVATE mylib).\n"
         << "After creating or editing ANY script (C++ or Lua), verify it before telling the user it is ready: start the scene with control_play_mode (action=start), then call read_output_log to inspect the editor output. A C++ compile error appears as a build failure with compiler messages; a Lua or C++ runtime error appears as a 'Script crash in scene ...' entry. If the scene is still building, read_output_log again. If you find errors, stop play with control_play_mode (action=stop), fix the script with update_script_file, and verify again -- repeat until the log is clean, then stop play. Do not claim the script works without reading the log.\n"
@@ -1743,6 +1753,13 @@ ValidationResult EditorActionRegistry::validate(const std::string& name, const J
             }
         }
         return ok();
+    }
+    if (name == "set_project_asset_dirs") {
+        if (isWrongTypedString(arguments, "assets_dir") || isWrongTypedString(arguments, "lua_dir")) {
+            return fail("assets_dir and lua_dir must be strings.");
+        }
+        return hasString(arguments, "assets_dir") || hasString(arguments, "lua_dir")
+            ? ok() : fail("set_project_asset_dirs requires assets_dir or lua_dir.");
     }
     if (name == "set_project_cxx_standard") {
         if (!arguments.contains("cxx_standard") || !arguments["cxx_standard"].is_number_integer()) {
@@ -2184,6 +2201,9 @@ std::string EditorActionRegistry::describe(const std::string& name, const Json& 
         }
         return list.empty() ? "Set project script directories"
                             : "Set project script directories: " + list;
+    }
+    if (name == "set_project_asset_dirs") {
+        return "Set project asset directories";
     }
     if (name == "set_project_cxx_standard") {
         if (arguments.contains("cxx_standard") && arguments["cxx_standard"].is_number_integer()) {

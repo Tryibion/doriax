@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <unordered_map>
 #include <limits>
+#include <optional>
 #include <random>
 #include <thread>
 
@@ -2565,7 +2566,90 @@ static bool holdsOnlyAssets(const std::filesystem::path& directory){
     return !ec;
 }
 
-bool editor::Project::visitAssetPathsInMaterialFiles(const std::function<bool(std::string&)>& transform){
+// False when the path or a parent is a file
+static bool canHoldDirectory(const std::filesystem::path& directory){
+    std::error_code ec;
+    std::filesystem::path existing = directory;
+    while (!existing.empty() && !std::filesystem::exists(existing, ec)){
+        existing = existing.parent_path();
+    }
+    return !existing.empty() && std::filesystem::is_directory(existing, ec);
+}
+
+static bool sameFileContent(const std::filesystem::path& a, const std::filesystem::path& b){
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(a, ec) || !std::filesystem::is_regular_file(b, ec) ||
+        std::filesystem::file_size(a, ec) != std::filesystem::file_size(b, ec) || ec){
+        return false;
+    }
+
+    std::ifstream fileA(a, std::ios::binary);
+    std::ifstream fileB(b, std::ios::binary);
+    if (!fileA || !fileB){
+        return false;
+    }
+    char bufferA[8192];
+    char bufferB[8192];
+    while (fileA && fileB){
+        fileA.read(bufferA, sizeof(bufferA));
+        fileB.read(bufferB, sizeof(bufferB));
+        if (fileA.gcount() != fileB.gcount() ||
+            !std::equal(bufferA, bufferA + fileA.gcount(), bufferB)){
+            return false;
+        }
+    }
+    return true;
+}
+
+// First destination file whose content differs from its source
+static std::filesystem::path findContentClash(const std::filesystem::path& source, const std::filesystem::path& destination){
+    std::error_code ec;
+    if (!std::filesystem::is_directory(std::filesystem::symlink_status(source, ec))){
+        if (std::filesystem::exists(source, ec) && std::filesystem::exists(destination, ec) &&
+            !sameFileContent(source, destination)){
+            return destination;
+        }
+        return {};
+    }
+
+    for (auto it = std::filesystem::recursive_directory_iterator(source, std::filesystem::directory_options::skip_permission_denied, ec);
+         it != std::filesystem::recursive_directory_iterator(); ++it){
+        if (!it->is_regular_file()){
+            continue;
+        }
+        const std::filesystem::path target = destination / it->path().lexically_relative(source);
+        if (std::filesystem::exists(target, ec) && !sameFileContent(it->path(), target)){
+            return target;
+        }
+    }
+    return {};
+}
+
+// Probes without changing anything: append mode, then a new uniquely named directory
+static bool isWritableForSave(const std::filesystem::path& file){
+    std::error_code ec;
+    if (std::filesystem::exists(file, ec)){
+        std::ofstream probe(file, std::ios::binary | std::ios::app);
+        if (!probe){
+            return false;
+        }
+    }
+
+    std::random_device random;
+    for (int attempt = 0; attempt < 4; attempt++){
+        const std::filesystem::path probe = file.parent_path() / (".doriax-probe-" + std::to_string(random()));
+        if (std::filesystem::create_directory(probe, ec)){
+            std::filesystem::remove(probe, ec);
+            return true;
+        }
+        if (ec){
+            return false;
+        }
+    }
+    return false;
+}
+
+bool editor::Project::visitAssetPathsInMaterialFiles(const std::function<bool(std::string&)>& transform, std::vector<std::filesystem::path>* failed){
     if (projectPath.empty()){
         return false;
     }
@@ -2608,19 +2692,20 @@ bool editor::Project::visitAssetPathsInMaterialFiles(const std::function<bool(st
             continue;
         }
 
-        std::ofstream file(entry.path(), std::ios::binary);
-        if (!file){
+        if (!FileUtils::writeFileReplacing(entry.path(), YAML::Dump(Stream::encodeMaterial(material)))){
             Out::error("Failed to write material: %s", entry.path().string().c_str());
+            if (failed){
+                failed->push_back(entry.path());
+            }
             continue;
         }
-        file << YAML::Dump(Stream::encodeMaterial(material));
         changed = true;
     }
 
     return changed;
 }
 
-void editor::Project::changeAssetRoots(const std::filesystem::path& newAssetsDir, const std::filesystem::path& newLuaDir){
+bool editor::Project::changeAssetRoots(const std::filesystem::path& newAssetsDir, const std::filesystem::path& newLuaDir, std::string* error){
     const fs::path oldAssetsRoot = getAssetsPath();
     const fs::path oldLuaRoot = getLuaPath();
     const fs::path newAssetsRoot = resolveRootDir(projectPath, newAssetsDir);
@@ -2629,7 +2714,19 @@ void editor::Project::changeAssetRoots(const std::filesystem::path& newAssetsDir
     if (projectPath.empty() || (oldAssetsRoot == newAssetsRoot && oldLuaRoot == newLuaRoot)){
         assetsDir = newAssetsDir;
         luaDir = newLuaDir;
-        return;
+        return true;
+    }
+
+    auto fail = [&](const std::string& reason) {
+        Out::error("%s", reason.c_str());
+        if (error){
+            *error = reason;
+        }
+        return false;
+    };
+
+    if (!canHoldDirectory(newAssetsRoot) || !canHoldDirectory(newLuaRoot)){
+        return fail("Asset directories not changed: a new directory is a file or lies under one");
     }
 
     // Buffers must reach disk before their files move, as a play session does
@@ -2639,8 +2736,6 @@ void editor::Project::changeAssetRoots(const std::filesystem::path& newAssetsDir
     const bool luaChanged = oldLuaRoot != newLuaRoot;
 
     std::error_code ec;
-    fs::create_directories(newAssetsRoot, ec);
-    fs::create_directories(newLuaRoot, ec);
 
     // Scenes that are not open still hold references, so they are loaded and unloaded again
     std::vector<uint32_t> temporarilyLoaded;
@@ -2653,9 +2748,13 @@ void editor::Project::changeAssetRoots(const std::filesystem::path& newAssetsDir
         temporarilyLoaded.push_back(sceneId);
     }
 
+    // Scenes that failed to save stay loaded so their new paths are kept
+    std::vector<fs::path> failedSaves;
+    std::unordered_set<uint32_t> unsavedScenes;
     auto unloadTemporaryScenes = [&]() {
         for (uint32_t sceneId : temporarilyLoaded){
-            if (SceneProject* sceneProject = getScene(sceneId)){
+            SceneProject* sceneProject = getScene(sceneId);
+            if (sceneProject && !unsavedScenes.count(sceneId)){
                 deleteSceneProject(sceneProject);
             }
         }
@@ -2674,7 +2773,8 @@ void editor::Project::changeAssetRoots(const std::filesystem::path& newAssetsDir
             return false;
         }
 
-        if (fs::is_directory(source, moveEc)){
+        // Never walk into a linked directory
+        if (fs::is_directory(fs::symlink_status(source, moveEc))){
             fs::create_directories(destination, moveEc);
             bool moved = false;
             for (const auto& entry : fs::directory_iterator(source, moveEc)){
@@ -2758,45 +2858,133 @@ void editor::Project::changeAssetRoots(const std::filesystem::path& newAssetsDir
 
     // Files outside the new root are moved into it, keeping their layout relative to
     // the old root so references between them (a model and its textures) still match.
+    struct Relocation {
+        fs::path destination;
+        // The file, or its model folder
+        fs::path source;
+        fs::path sourceDestination;
+    };
+    auto planRelocation = [&](const fs::path& absolutePath, const fs::path& oldRoot, const fs::path& newRoot) {
+        std::error_code planEc;
+        const fs::path relativeToOld = fs::relative(absolutePath, oldRoot, planEc);
+        if (planEc || relativeToOld.empty() || *relativeToOld.begin() == ".."){
+            return std::optional<Relocation>();
+        }
+
+        Relocation plan;
+        plan.destination = (newRoot / relativeToOld).lexically_normal();
+        plan.source = absolutePath;
+        plan.sourceDestination = plan.destination;
+
+        // Models carry sidecar files referenced from inside the model, so their folder
+        // moves along when it holds nothing else.
+        if (Util::isModelFile(absolutePath.string()) && relativeToOld.has_parent_path()){
+            const fs::path modelDir = (oldRoot / relativeToOld.parent_path()).lexically_normal();
+            if (!isInsideRoot(newRoot, modelDir) && holdsOnlyAssets(modelDir)){
+                plan.source = modelDir;
+                plan.sourceDestination = (newRoot / relativeToOld.parent_path()).lexically_normal();
+            }
+        }
+        return std::optional<Relocation>(plan);
+    };
+
     auto relocate = [&](const fs::path& absolutePath, const fs::path& oldRoot, const fs::path& newRoot) {
         if (relocationFailed || isInsideRoot(absolutePath, newRoot) || relocations.count(absolutePath)){
             return;
         }
 
-        std::error_code relocateEc;
-        const fs::path relativeToOld = fs::relative(absolutePath, oldRoot, relocateEc);
-        if (relocateEc || relativeToOld.empty() || *relativeToOld.begin() == ".."){
+        const std::optional<Relocation> plan = planRelocation(absolutePath, oldRoot, newRoot);
+        if (!plan){
             Out::warning("Reference outside both asset directories was kept as is: %s", absolutePath.string().c_str());
             relocations[absolutePath] = absolutePath;
             return;
         }
+        relocations[absolutePath] = plan->destination;
 
-        const fs::path destination = (newRoot / relativeToOld).lexically_normal();
-        relocations[absolutePath] = destination;
-
-        // Models carry sidecar files referenced from inside the model, so their folder
-        // moves along when it holds nothing else.
-        fs::path source = absolutePath;
-        fs::path sourceDestination = destination;
-        if (Util::isModelFile(absolutePath.string()) && relativeToOld.has_parent_path()){
-            const fs::path modelDir = (oldRoot / relativeToOld.parent_path()).lexically_normal();
-            if (!isInsideRoot(newRoot, modelDir) && holdsOnlyAssets(modelDir)){
-                source = modelDir;
-                sourceDestination = (newRoot / relativeToOld.parent_path()).lexically_normal();
-            }
-        }
-
-        if (moveEntry(source, sourceDestination)){
-            Out::info("Moved %s to %s", source.string().c_str(), sourceDestination.string().c_str());
+        if (moveEntry(plan->source, plan->sourceDestination)){
+            Out::info("Moved %s to %s", plan->source.string().c_str(), plan->sourceDestination.string().c_str());
             return;
         }
 
         // Nothing moved: the reference only follows when the file is already there.
-        if (fs::exists(destination, relocateEc)){
+        std::error_code relocateEc;
+        if (fs::exists(plan->destination, relocateEc)){
             return;
         }
 
         relocations[absolutePath] = absolutePath;
+    };
+
+    // relative() resolves links, so a linked destination shows up outside the root
+    auto findEscape = [&](const fs::path& source, const fs::path& destination, const fs::path& newRoot) {
+        if (!isInsideRoot(destination, newRoot)){
+            return destination;
+        }
+        std::error_code walkEc;
+        if (fs::is_directory(fs::symlink_status(source, walkEc))){
+            for (auto it = fs::recursive_directory_iterator(source, fs::directory_options::skip_permission_denied, walkEc);
+                 it != fs::recursive_directory_iterator(); ++it){
+                const fs::path target = destination / it->path().lexically_relative(source);
+                if (!isInsideRoot(target, newRoot)){
+                    return target;
+                }
+            }
+        }
+        return fs::path();
+    };
+
+    auto findBlocker = [&](const std::vector<fs::path>& sources, const fs::path& oldRoot, const fs::path& newRoot) {
+        for (const fs::path& source : sources){
+            if (isInsideRoot(source, newRoot)){
+                continue;
+            }
+            const std::optional<Relocation> plan = planRelocation(source, oldRoot, newRoot);
+            if (!plan){
+                continue;
+            }
+            const fs::path escape = findEscape(plan->source, plan->sourceDestination, newRoot);
+            if (!escape.empty()){
+                return escape.string() + " would leave " + newRoot.string() + " through a link";
+            }
+            const fs::path clash = findContentClash(plan->source, plan->sourceDestination);
+            if (!clash.empty()){
+                return clash.string() + " already exists and differs from the file the project references; move or rename one of them first";
+            }
+        }
+        return std::string();
+    };
+
+    // Files the change rewrites
+    auto findUnwritable = [&]() {
+        std::vector<fs::path> files = {projectPath / "project.yaml"};
+        for (const SceneProject& sceneProject : scenes){
+            if (!sceneProject.filepath.empty()){
+                files.push_back(sceneProject.filepath.is_relative() ? projectPath / sceneProject.filepath : sceneProject.filepath);
+            }
+        }
+        for (const auto& [bundlePath, bundle] : entityBundles){
+            files.push_back(projectPath / bundlePath);
+        }
+        if (assetsChanged){
+            std::error_code walkEc;
+            for (auto it = fs::recursive_directory_iterator(projectPath, fs::directory_options::skip_permission_denied, walkEc);
+                 it != fs::recursive_directory_iterator(); ++it){
+                const std::string name = it->path().filename().string();
+                if (it->is_directory() && !name.empty() && (name[0] == '.' || name == "build")){
+                    it.disable_recursion_pending();
+                    continue;
+                }
+                if (it->is_regular_file() && Util::isMaterialFile(it->path().string())){
+                    files.push_back(it->path());
+                }
+            }
+        }
+        for (const fs::path& file : files){
+            if (!isWritableForSave(file)){
+                return file.string() + " cannot be written";
+            }
+        }
+        return std::string();
     };
 
     // Resolved before anything moves: a file that cannot be relocated aborts the whole change.
@@ -2870,8 +3058,9 @@ void editor::Project::changeAssetRoots(const std::filesystem::path& newAssetsDir
 
             sceneProject.isModified = true;
             sceneProject.needUpdateRender = true;
-            if (!sceneProject.filepath.empty()){
-                saveSceneToPath(sceneProject.id, sceneProject.filepath);
+            if (!sceneProject.filepath.empty() && !saveSceneToPath(sceneProject.id, sceneProject.filepath)){
+                failedSaves.push_back(sceneProject.filepath);
+                unsavedScenes.insert(sceneProject.id);
             }
         }
 
@@ -2889,10 +3078,13 @@ void editor::Project::changeAssetRoots(const std::filesystem::path& newAssetsDir
 
             bundle.isModified = true;
             saveEntityBundleToDisk(bundlePath);
+            if (bundle.isModified){
+                failedSaves.push_back(bundlePath);
+            }
         }
 
         if (assetsChanged){
-            visitAssetPathsInMaterialFiles(assetVisitor);
+            visitAssetPathsInMaterialFiles(assetVisitor, &failedSaves);
         }
     };
 
@@ -2900,8 +3092,38 @@ void editor::Project::changeAssetRoots(const std::filesystem::path& newAssetsDir
 
     // Generated maps follow the assets root, moved before references resolve against it
     const fs::path oldTerrainMaps = oldAssetsRoot / "terrain_maps";
-    if (assetsChanged && fs::is_directory(oldTerrainMaps, ec) &&
-        !isInsideRoot(oldTerrainMaps, newAssetsRoot) && !isInsideRoot(newAssetsRoot, oldTerrainMaps)){
+    const bool moveTerrainMaps = assetsChanged && fs::is_directory(oldTerrainMaps, ec) &&
+        !isInsideRoot(oldTerrainMaps, newAssetsRoot) && !isInsideRoot(newAssetsRoot, oldTerrainMaps);
+
+    std::string blocker = findBlocker(assetSources, oldAssetsRoot, newAssetsRoot);
+    if (blocker.empty()){
+        blocker = findBlocker(luaSources, oldLuaRoot, newLuaRoot);
+    }
+    if (blocker.empty() && moveTerrainMaps){
+        const fs::path escape = findEscape(oldTerrainMaps, newAssetsRoot / "terrain_maps", newAssetsRoot);
+        const fs::path clash = findContentClash(oldTerrainMaps, newAssetsRoot / "terrain_maps");
+        if (!escape.empty()){
+            blocker = escape.string() + " would leave " + newAssetsRoot.string() + " through a link";
+        }else if (!clash.empty()){
+            blocker = clash.string() + " already exists and differs from the generated terrain map";
+        }
+    }
+    if (blocker.empty()){
+        blocker = findUnwritable();
+    }
+    if (blocker.empty()){
+        fs::create_directories(newAssetsRoot, ec);
+        fs::create_directories(newLuaRoot, ec);
+        if (!fs::is_directory(newAssetsRoot, ec) || !fs::is_directory(newLuaRoot, ec)){
+            blocker = "a new directory could not be created";
+        }
+    }
+    if (!blocker.empty()){
+        unloadTemporaryScenes();
+        return fail("Asset directories not changed: " + blocker);
+    }
+
+    if (moveTerrainMaps){
         moveEntry(oldTerrainMaps, newAssetsRoot / "terrain_maps");
     }
 
@@ -2915,10 +3137,7 @@ void editor::Project::changeAssetRoots(const std::filesystem::path& newAssetsDir
     if (relocationFailed){
         undoMoves();
         unloadTemporaryScenes();
-
-        Out::error("Asset directories not changed: a referenced file could not be moved");
-        editor::getEditorHost().registerAlert("Error", "Failed to move files to the new directories!");
-        return;
+        return fail("Asset directories not changed: a referenced file could not be moved");
     }
 
     assetsDir = newAssetsDir;
@@ -2950,7 +3169,19 @@ void editor::Project::changeAssetRoots(const std::filesystem::path& newAssetsDir
 
     unloadTemporaryScenes();
 
-    saveProjectFile();
+    if (!saveProjectFile()){
+        failedSaves.push_back("project.yaml");
+    }
+    if (!failedSaves.empty()){
+        std::string files;
+        for (const fs::path& file : failedSaves){
+            const fs::path shown = file.is_absolute() ? file.lexically_relative(projectPath) : file;
+            files += (files.empty() ? "" : ", ") + shown.generic_string();
+        }
+        return fail("Asset directories changed, but these files could not be saved and still hold the old paths on disk: " +
+                    files + ". Scenes and bundles keep the new paths in the editor and can be saved again");
+    }
+    return true;
 }
 
 void editor::Project::setPackNativeResources(bool enabled){

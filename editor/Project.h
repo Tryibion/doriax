@@ -509,7 +509,8 @@ namespace doriax::editor{
         static SceneResources collectResourcesInRegistry(EntityRegistry* registry);
         // Same for Lua script entries; C++ ones are build inputs kept project-relative.
         static bool visitLuaPathsInRegistry(EntityRegistry* registry, const std::function<bool(std::string&)>& transform);
-        bool visitAssetPathsInMaterialFiles(const std::function<bool(std::string&)>& transform);
+        // Unwritten files go in failed
+        bool visitAssetPathsInMaterialFiles(const std::function<bool(std::string&)>& transform, std::vector<std::filesystem::path>* failed = nullptr);
         // Runs an asset transform over every scene, entity bundle and material file,
         // marking what changed.
         void applyAssetPathChange(const std::function<bool(std::string&)>& transform);
@@ -661,8 +662,8 @@ namespace doriax::editor{
         std::filesystem::path normalizeToLuaRelative(const std::filesystem::path& path) const;
 
         // Applies new roots: referenced files outside them are moved in keeping their
-        // layout, then every stored reference is rewritten and saved.
-        void changeAssetRoots(const std::filesystem::path& newAssetsDir, const std::filesystem::path& newLuaDir);
+        // layout, then every stored reference is rewritten and saved. False with error on failure.
+        bool changeAssetRoots(const std::filesystem::path& newAssetsDir, const std::filesystem::path& newLuaDir, std::string* error = nullptr);
 
         void setPackNativeResources(bool enabled);
         bool shouldPackNativeResources() const;

@@ -2403,6 +2403,7 @@ ActionResult EditorActionExecutor::dispatch(const std::string& name,
     if (name == "update_script_file") return updateScriptFile(arguments);
     if (name == "create_source_file") return createSourceFile(arguments);
     if (name == "set_project_script_dirs") return setProjectScriptDirs(arguments);
+    if (name == "set_project_asset_dirs") return setProjectAssetDirs(arguments);
     if (name == "set_project_cxx_standard") return setProjectCxxStandard(arguments);
     if (name == "update_project_build_file") return updateProjectBuildFile(arguments);
     if (name == "create_bundle_from_entity") return createBundleFromEntity(arguments);
@@ -4553,6 +4554,66 @@ ActionResult EditorActionExecutor::setProjectScriptDirs(const Json& arguments) {
                         ? "Cleared the project script directories."
                         : "Set the project script directories. The next play or export builds with them.",
                     Json{{"script_dirs", scriptDirs}});
+}
+
+ActionResult EditorActionExecutor::setProjectAssetDirs(const Json& arguments) {
+    if (project->isAnyScenePlaying()) {
+        return failResult(busyError(project, "changing the asset directories"));
+    }
+    // The change saves every open buffer
+    if (hasUnsavedScriptEdits()) {
+        return failResult(kUnsavedScriptEdits);
+    }
+
+    fs::path assetsDir = project->getAssetsDir();
+    fs::path luaDir = project->getLuaDir();
+    // "." is the project root, which isSafeRelativePath rejects
+    const auto readDir = [&](const char* key, fs::path& directory, std::string& error) {
+        const auto it = arguments.find(key);
+        if (it == arguments.end() || !it->is_string()) return true;
+        fs::path value = FileUtils::pathFromUtf8(it->get<std::string>()).lexically_normal();
+        if (!value.empty() && !value.has_filename()) value = value.parent_path();
+        if (value.empty() || value == ".") {
+            directory = ".";
+            return true;
+        }
+        if (!PathUtils::isSafeRelativePath(value)) {
+            error = std::string(key) + " must be . or a project-relative directory inside the project.";
+            return false;
+        }
+        for (const fs::path& part : value) {
+            if (!part.empty() && part.string().front() == '.') {
+                error = std::string(key) + " cannot be a hidden directory: the editor and exports skip those.";
+                return false;
+            }
+        }
+        // Links can point outside the project
+        std::error_code linkEc;
+        const fs::path projectRoot = fs::weakly_canonical(project->getProjectPath(), linkEc);
+        const fs::path inside = fs::weakly_canonical(project->getProjectPath() / value, linkEc).lexically_relative(projectRoot);
+        if (linkEc || inside.empty() || *inside.begin() == "..") {
+            error = std::string(key) + " leads outside the project through a link.";
+            return false;
+        }
+        directory = value;
+        return true;
+    };
+    std::string error;
+    if (!readDir("assets_dir", assetsDir, error) || !readDir("lua_dir", luaDir, error)) {
+        return failResult(error);
+    }
+
+    if (!project->changeAssetRoots(assetsDir, luaDir, &error)) {
+        return failResult(error + ".");
+    }
+    if (!project->saveProjectFile()) {
+        return failResult("Failed to save the project with the new directories.");
+    }
+
+    return okResult("Set the project directories. Referenced files moved and their references were rewritten; "
+                    "read_output_log lists each move. Files nothing references stayed where they were.",
+                    Json{{"assets_dir", FileUtils::pathToGenericUtf8(project->getAssetsDir())},
+                         {"lua_dir", FileUtils::pathToGenericUtf8(project->getLuaDir())}});
 }
 
 ActionResult EditorActionExecutor::setProjectCxxStandard(const Json& arguments) {
