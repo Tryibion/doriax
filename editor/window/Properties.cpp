@@ -13868,7 +13868,14 @@ void editor::Properties::show(){
         // Show the component add dialog
         componentAddDialog.show();
 
-        if (ImGui::BeginChild("PropertiesScrollRegion", ImVec2(0, 0), ImGuiChildFlags_NavFlattened)) {
+        std::string scrollId = "PropertiesScrollRegion";
+        if (entities.size() == 1) {
+            scrollId += "_" + std::to_string(sceneProject->id) + "_" + std::to_string(entities[0]);
+        } else {
+            scrollId += "_Multi";
+        }
+
+        if (ImGui::BeginChild(scrollId.c_str(), ImVec2(0, 0), ImGuiChildFlags_NavFlattened)) {
             bool isBundle = !bundlePath.empty();
 
             // Root entity of a bundle is always local, not part of the bundle template
@@ -14081,12 +14088,12 @@ void editor::Properties::show(){
             }
         }
         ImGui::Separator();
-        
+
         if (ImGui::GetScrollY() > 0.0f) {
             ImGui::SetScrollY(0.0f);
         }
-        
-        if (ImGui::BeginChild("PropertiesScrollRegion", ImVec2(0, 0), ImGuiChildFlags_NavFlattened)) {
+
+        if (ImGui::BeginChild("PropertiesScrollRegion_Scene", ImVec2(0, 0), ImGuiChildFlags_NavFlattened)) {
             if (sceneProject->scene) {
                 ImGuiTableFlags tableFlags = ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchSame;
                 const float shadowQualityLabelColWidth = getLabelSize("Filter Quality") + ImGui::GetStyle().CellPadding.x * 2.0f;
